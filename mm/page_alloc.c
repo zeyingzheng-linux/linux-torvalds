@@ -142,6 +142,21 @@ static unsigned long __meminitdata dma_reserve;
     #endif
   #endif
 
+/* 活动内存区就是不包含空洞的内存区。 必须使用add_active_range
+ * 在全局变量early_node_map中注册内存区
+ * 当前注册的内存区数目记载在nr_nodemap_entries中。 不同内存区
+ * 的最大数目由MAX_ACTIVE_REGIONS给出。 该值可以由特定于体系结构
+ * 的代码使用CONFIG_MAX_ACTIVE_REGIONS设置。 如果不设置， 在默认
+ * 情况下内核允许每个内存结点注册256个活动内存区（如果在超过32个
+ * 结点的系统上， 允许每个NUMA结点注册50个内存区）
+ * */
+/* 直到现在， 我们只在特定于体系结构的代码中看到了内核如何检测系统
+ * 中的可用内存。 与高层数据结构（如内存域和结点） 的关联， 则需要
+ * 根据该信息构建。 我们知道， 体系结构相关代码需要在启动期间建立
+ * 以下信息:
+ * 1. 系统中各个内存域的页帧边界， 保存在max_zone_pfn数组
+ * 2. 各结点页帧的分配情况， 保存在全局变量early_node_map中
+ * */
   static struct node_active_region __meminitdata early_node_map[MAX_ACTIVE_REGIONS];
   static int __meminitdata nr_nodemap_entries;
   static unsigned long __meminitdata arch_zone_lowest_possible_pfn[MAX_NR_ZONES];
@@ -1887,6 +1902,8 @@ void show_free_areas(void)
  *
  * Add all populated zones of a node to the zonelist.
  */
+/* nr_zone表示从备用列表中的哪个位置开始填充新项。
+ * 由于列表中尚没有项， 因此调用者传递了0 */
 static int build_zonelists_node(pg_data_t *pgdat, struct zonelist *zonelist,
 				int nr_zones, enum zone_type zone_type)
 {
@@ -1898,6 +1915,7 @@ static int build_zonelists_node(pg_data_t *pgdat, struct zonelist *zonelist,
 	do {
 		zone_type--;
 		zone = pgdat->node_zones + zone_type;
+		/* 即确认内存域中确实有页存在 */
 		if (populated_zone(zone)) {
 			zonelist->zones[nr_zones++] = zone;
 			check_highest_zone(zone_type);
@@ -2195,6 +2213,25 @@ static void set_zonelist_order(void)
 		current_zonelist_order = user_zonelist_order;
 }
 
+/* 建立备用层次结构的任务委托给build_zonelists， 该函数为每个NUMA结点都创建了相应的数据
+ * 结构。它需要指向相关的pg_data_t实例的指针作为参数。 在我详细讨论代码之前， 先回想一下
+ * 上文提到的一个问题。 我们已经将讨论的范围限制到UMA系统， 为什么必须考虑多个NUMA结点呢？
+ * 实际上， 如果设置了CONFIG_NUMA， 内核会使用不同的实现替换下列代码。 但也有可能某个体系
+ * 结构在UMA系统上选择不连续或稀疏内存选项。 在地址空间包含较大空洞的情况下， 这样做可能
+ * 是有好处的。 这样的洞造成的内存“块”，最好通过NUMA提供的数据结构来处理。 这也是为什么
+ * 此处需要处理NUMA结点的原因
+ * */
+/* 假设节点分别为A，B，C，D。DMA,Normal,HighMem分别为0，1，2，那么为节点C
+ * 建立的备份列表大概是这样：
+ * DMA内存 ： C0 -> D0 -> A0 -> B0 -> NULL
+ * 普通内存： C1 -> C0 -> D1 -> D0 -> A1 -> A0 -> B1 -> B0 -> NULL
+ * 高端内存： C2 -> C1 -> C0 -> D2 -> D1 -> D0 -> A2 -> A1 -> A0 -> B2 -> B1 -> B0 -> NULL
+ * 当然节点的顺序不见得是这样的，得看节点时间的距离，这也许是以前的简陋实现
+ * 看下 build_thisnode_zonelists 就知道本地节点的是放在最后的 MAX_ZONELISTS
+ * DMA内存 ： D0 -> A0 -> B0 -> C0 -> NULL
+ * 普通内存： D1 -> D0 -> A1 -> A0 -> B1 -> B0 -> C1 -> C0 -> NULL
+ * 高端内存： D2 -> D1 -> D0 -> A2 -> A1 -> A0 -> B2 -> B1 -> B0 -> C2 -> C1 -> C0 -> NULL
+ * */
 static void build_zonelists(pg_data_t *pgdat)
 {
 	int j, node, load;
@@ -2331,6 +2368,13 @@ static int __build_all_zonelists(void *dummy)
 {
 	int nid;
 
+	/* 遍历了系统中所有的活动结点。 由于UMA系统只有一个结点， build_zonelists
+	 * 只调用了一次， 就对所有的内存创建了内存域列表。 NUMA系统调用该函数的次数
+	 * 等同于结点的数目。 每次调用对一个不同结点生成内存域数据
+	 * 内核还针对当前内存结点的备选结点， 定义了一个等级次序。 这有助于在当前结点
+	 * 所有内存域的内存都用尽时， 确定一个备选结点.
+	 * 一个大的外部循环首先迭代所有的结点内存域。 每个循环在zonelist数组中找到
+	 * 第i个zonelist， 对第i个内存域计算备用列表 */
 	for_each_online_node(nid) {
 		pg_data_t *pgdat = NODE_DATA(nid);
 
@@ -2361,6 +2405,12 @@ void build_all_zonelists(void)
 	 * made on memory-hotadd so a system can start with mobility
 	 * disabled and enable it later
 	 */
+	/* 如果各迁移类型的链表中没有一块较大的连续内存， 那么页面迁移不
+	 * 会提供任何好处， 因此在可用内存太少时内核会关闭该特性。 这是
+	 * 在build_all_zonelists函数中检查的， 该函数用于初始化内存域列
+	 * 表。 如果没有足够的内存可用， 则全局变量page_group_by_mobility
+	 * 设置为0， 否则设置为1
+	 * */
 	if (vm_total_pages < (pageblock_nr_pages * MIGRATE_TYPES))
 		page_group_by_mobility_disabled = 1;
 	else
@@ -2505,6 +2555,17 @@ static void setup_zone_migrate_reserve(struct zone *zone)
  * up by free_all_bootmem() once the early boot process is
  * done. Non-atomic initialization, single-pass.
  */
+/* 按3.5.4节中的讨论， 在分配内存时， 如果必须“盗取”不同于预定
+ * 迁移类型的内存区， 内核在策略上倾向于“盗取”更大的内存区。 由
+ * 于所有页最初都是可移动的， 那么在内核分配不可移动的内存区时，
+ * 则必须“盗取”。实际上， 在启动期间分配可移动内存区的情况较少，
+ * 那么分配器有很高的几率分配长度最大的内存区， 并将其从可移动列
+ * 表转换到不可移动列表。 由于分配的内存区长度是最大的， 因此不
+ * 会向可移动内存中引入碎片。总而言之， 这种做法避免了启动期间内
+ * 核分配的内存（经常在系统的整个运行时间都不释放） 散布到物理内
+ * 存各处， 从而使其他类型的内存分配免受碎片的干扰， 这也是页可
+ * 移动性分组框架的最重要的目标之一
+ * */
 void __meminit memmap_init_zone(unsigned long size, int nid, unsigned long zone,
 		unsigned long start_pfn, enum memmap_context context)
 {
@@ -2539,6 +2600,7 @@ void __meminit memmap_init_zone(unsigned long size, int nid, unsigned long zone,
 		 * the start are marked MIGRATE_RESERVE by
 		 * setup_zone_migrate_reserve()
 		 */
+		/* 所有的页最初都标记为可移动的 */
 		if ((pfn & (pageblock_nr_pages-1)))
 			set_pageblock_migratetype(page, MIGRATE_MOVABLE);
 
@@ -2565,7 +2627,17 @@ static void __meminit zone_init_free_lists(struct pglist_data *pgdat,
 #define memmap_init(size, nid, zone, start_pfn) \
 	memmap_init_zone((size), (nid), (zone), (start_pfn), MEMMAP_EARLY)
 #endif
-
+/* 代码计算得到的batch， 大约相当于内存域中页数的0.25‰。
+ * 移位操作确保计算结果具有2n-1的形式，根据经验， 该值
+ * 在大多数系统负载下都能最小化缓存混叠效应。 fls是一个
+ * 特定于计算机的操作， 用于算出一个值中置位的最低比特位。
+ * 要注意， 这种校正会使结果值偏离内存域中页数的0.25‰。
+ * batch = 22时偏差最大。 由于22+11-1=32， fls会算出比特位5
+ * 是最低置位比特位， 而1<<5 - 1 = 31。 通常情况下偏差都比
+ * 这小， 实际上是可以忽略的。内存域中的内存数量超出512 MiB时，
+ * 批量大小并不增长。 对于页面大小为4 096 KiB的系统， 如果页数
+ * 超过131 072， 则会达到512 MiB的限制
+ * */
 static int zone_batchsize(struct zone *zone)
 {
 	int batch;
@@ -2598,6 +2670,26 @@ static int zone_batchsize(struct zone *zone)
 	return batch;
 }
 
+/* 对热页来说， 下限为0， 上限为6*batch， 缓存中页的平均数量
+ * 大约是4*batch， 因为内核不会让缓存水平降到太低。 batch * 4
+ * 相当于内存域中页数的千分之一（这也是zone_batchsize试图将批量
+ * 大小优化到总页数0.25‰的原因） 。 IA-32处理器上L2缓存的数量在
+ * 0.25 MiB～2 MiB之间， 因此在冷热缓存中保持更多的内存是无意义的。
+ * 根据经验， 缓存大小是主内存的千分之一。 考虑到当前系统每个CPU
+ * 配备的物理内存大约在1 GiB～2 GiB， 该规则是有意义的。 这样， 计
+ * 算出的批量大小使得冷热缓存中的页有可能放置到CPU的L2缓存中。冷
+ * 页列表的水印稍低一些， 因为冷页并不放置到缓存中， 只用于一些不
+ * 太关注性能的操作（当然， 在内核中这样的操作属于少数） 。 其上限
+ * 是batch值的两倍。pcp->batch决定了在重新填充列表时， 有多少页会
+ * 立即使用。 出于性能方面的考虑， 一般会向列表添加连续的多页， 而
+ * 不是单页
+ * 在zone_pcp_init结束时， 会输出各个内存域的页数以及计算出的批量
+ * 大小， 从启动日志可以看到（下面例子中的系统配备了4 GiB内存）
+ * root@meitner # dmesg | grep LIFO
+ * DMA zone: 2530 pages, LIFO batch:0
+ * DMA32 zone: 833464 pages, LIFO batch:31
+ * Normal zone: 193920 pages, LIFO batch:31
+ * */
 inline void setup_pageset(struct per_cpu_pageset *p, unsigned long batch)
 {
 	struct per_cpu_pages *pcp;
@@ -3218,7 +3310,10 @@ static inline unsigned long __meminit zone_absent_pages_in_node(int nid,
 }
 
 #endif
-
+/* calculate_node_totalpages首先累计各个内存域的页数， 计算结点中页的总数。
+ * 对连续内存模型而言，这可以通过zones_size_init完成， 但
+ * calculate_zone_totalpages还考虑了内存域中的空洞
+ * */
 static void __meminit calculate_node_totalpages(struct pglist_data *pgdat,
 		unsigned long *zones_size, unsigned long *zholes_size)
 {
@@ -3365,6 +3460,9 @@ static void __meminit free_area_init_core(struct pglist_data *pgdat,
 					zone_names[0], dma_reserve);
 		}
 
+		/* 内核使用两个全局变量跟踪系统中的页数。 nr_kernel_pages
+		 * 统计所有一致映射的页， 而nr_all_pages还包括高端内存页在内
+		 * */
 		if (!is_highmem_idx(j))
 			nr_kernel_pages += realsize;
 		nr_all_pages += realsize;
@@ -3628,6 +3726,11 @@ unsigned long __init find_min_pfn_for_node(unsigned long nid)
  * It returns the minimum PFN based on information provided via
  * add_active_range().
  */
+/* 辅助函数find_min_pfn_with_active_regions用于找到注册的最低内存域中
+ * 可用的编号最小的页帧。 该内存域不必一定是ZONE_DMA，例如，在计算机不
+ * 需要DMA内存的情况下也可以是ZONE_NORMAL。 最低内存域的最大页帧号可以
+ * 从max_zone_pfn提供的信息直接获得
+ * */
 unsigned long __init find_min_pfn_with_active_regions(void)
 {
 	return find_min_pfn_for_node(MAX_NUMNODES);
@@ -3676,6 +3779,11 @@ static unsigned long __init early_calculate_totalpages(void)
  * memory. When they don't, some nodes will have more kernelcore than
  * others
  */
+/* 辅助函数find_zone_movable_pfns_for_nodes用于计算进入ZONE_MOVABLE
+ * 的内存数量。 如果kernelcore和movablecore参数都没有指定，
+ * find_zone_movable_pfns_for_nodes会使ZONE_MOVABLE保持为空， 该机制
+ * 处于无效状态
+ * */
 void __init find_zone_movable_pfns_for_nodes(unsigned long *movable_pfn)
 {
 	int i, nid;
@@ -3836,6 +3944,15 @@ static void check_for_regular_memory(pg_data_t *pgdat)
  * starts where the previous one ended. For example, ZONE_DMA32 starts
  * at arch_max_dma_pfn.
  */
+/* free_area_init_nodes首先必须分析并改写特定于体系结构的代码提供的信息。
+ * 其中， 需要对照在zone_max_pfn和zone_min_pfn中指定的内存域的边界，
+ * 计算各个内存域可使用的最低和最高的页帧编号。 使用了两个全局数组来存储
+ * 这些信息:
+ * arch_zone_lowest_possible_pfn & arch_zone_highest_possible_pfn
+ * 通过max_zone_pfn传递给free_area_init_nodes的信息记录了各个内存域包含的
+ * 最大页帧号。free_area_init_nodes将该信息转换为一种更方便的表示形式，
+ * 即以［low, high］ 形式描述各个内存域的页帧区间， 存储在前述的全局变量中
+ * */
 void __init free_area_init_nodes(unsigned long *max_zone_pfn)
 {
 	unsigned long nid;
@@ -3849,6 +3966,9 @@ void __init free_area_init_nodes(unsigned long *max_zone_pfn)
 				sizeof(arch_zone_lowest_possible_pfn));
 	memset(arch_zone_highest_possible_pfn, 0,
 				sizeof(arch_zone_highest_possible_pfn));
+	/* 用于找到注册的最低内存域中可用的编号最小的页帧，该内存域不必一定是
+	 * ZONE_DMA， 例如， 在计算机不需要DMA内存的情况下也可以是ZONE_NORMAL。
+	 * 最低内存域的最大页帧号可以从max_zone_pfn提供的信息直接获得 */
 	arch_zone_lowest_possible_pfn[0] = find_min_pfn_with_active_regions();
 	arch_zone_highest_possible_pfn[0] = max_zone_pfn[0];
 	for (i = 1; i < MAX_NR_ZONES; i++) {
@@ -3859,6 +3979,12 @@ void __init free_area_init_nodes(unsigned long *max_zone_pfn)
 		arch_zone_highest_possible_pfn[i] =
 			max(max_zone_pfn[i], arch_zone_lowest_possible_pfn[i]);
 	}
+	/* 由于ZONE_MOVABLE是一个虚拟内存域， 不与真正的硬件内存域关联， 该内存域
+	 * 的边界总是设置为0。 回忆前文， 可知只有在指定了内核命令行参数kernelcore
+	 * 或movablecore之一时， 该内存域才会存在。 该内存域一般开始于各个结点的某
+	 * 个特定内存域的某一页帧号，相应的编号在find_zone_movable_pfns_for_nodes
+	 * 里计算
+	 * */
 	arch_zone_lowest_possible_pfn[ZONE_MOVABLE] = 0;
 	arch_zone_highest_possible_pfn[ZONE_MOVABLE] = 0;
 
@@ -3899,6 +4025,11 @@ void __init free_area_init_nodes(unsigned long *max_zone_pfn)
 				find_min_pfn_for_node(nid), NULL);
 
 		/* Any memory on that node */
+		/* 回想一下3.2.2节， 我们知道该标志只表示结点上存在
+		 * 普通或高端内存， 因此check_for_regular_memory进
+		 * 一步检查低于ZONE_HIGHMEM的内存域中是否有内存，并
+		 * 据此在结点位图中相应地设置N_NORMAL_MEMORY标志
+		 * */
 		if (pgdat->node_present_pages)
 			node_set_state(nid, N_HIGH_MEMORY);
 		check_for_regular_memory(pgdat);

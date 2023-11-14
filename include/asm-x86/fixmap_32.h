@@ -51,6 +51,17 @@ extern unsigned long __FIXADDR_TOP;
  * TLB entries of such buffers will not be flushed across
  * task switches.
  */
+/* 固定映射地址的优点在于， 在编译时对此类地址的处理类似于常数，
+ * 内核一启动即为其分配了物理地址。 此类地址的反引用比普通指针
+ * 要快速。 内核会确保在上下文切换其间， 对应于固定映射的页表
+ * 项不会从TLB刷出， 因此在访问固定映射的内存时， 总是通过TLB
+ * 高速缓存取得对应的物理地址
+ * 内核提供了fix_to_virt函数， 用于计算固定映射常数的虚拟地址。
+ * 固定映射虚拟地址与物理内存页之间的关联是由set_fixmap(fixmap, page_nr)
+ * 和set_fixmap_nocache建立的（未讨论后者的实现） 。 这两个函数只是将页表
+ * 中的对应项与物理内存中的一页关联起来。 不同于set_fixmap，
+ * set_fixmap_nocache在必要情况下， 会停用所涉及页帧的硬件高速缓存
+ * */
 enum fixed_addresses {
 	FIX_HOLE,
 	FIX_VDSO,

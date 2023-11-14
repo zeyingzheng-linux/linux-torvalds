@@ -105,10 +105,17 @@ struct vm_area_struct;
 #define GFP_DMA32	__GFP_DMA32
 
 /* Convert GFP flags to their corresponding migrate type */
+/* 内核如何知道给定的分配内存属于何种迁移类型？ 读者在3.5.4节会看到
+ * ， 有关各个内存分配的细节都通过分配掩码指定。 内核提供了两个标志
+ * ， 分别用于表示分配的内存是可移动的（__GFP_MOVABLE） 或可回收
+ * 的（__GFP_RECLAIMABLE） 。 如果这些标志都没有设置， 则分配的内存
+ * 假定为不可移动的。 下列辅助函数可用于转换分配标志及对应的迁移类型
+ * */
 static inline int allocflags_to_migratetype(gfp_t gfp_flags)
 {
 	WARN_ON((gfp_flags & GFP_MOVABLE_MASK) == GFP_MOVABLE_MASK);
 
+	/* 如果停用了页面迁移特性， 则所有的页都是不可移动的 */
 	if (unlikely(page_group_by_mobility_disabled))
 		return MIGRATE_UNMOVABLE;
 

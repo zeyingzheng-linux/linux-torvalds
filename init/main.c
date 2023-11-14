@@ -504,6 +504,16 @@ void __init __attribute__((weak)) smp_setup_processor_id(void)
 {
 }
 
+/* 对相关数据结构的初始化是从全局启动例程start_kernel中开始的，
+ * 该例程在加载内核并激活各个子系统之后执行。 由于内存管理是
+ * 内核一个非常重要的部分， 因此在特定于体系结构的设置步骤中检
+ * 测内存并确定系统中内存的分配情况后， 会立即执行内存管理的初始
+ * 化（3.4.2节以IA-32系统为例， 简要描述了初始化中系统相关部分的实现）。
+ * 此时， 已经对各种系统内存模式生成了一个pgdat_t实例， 用于保存诸如
+ * 结点中内存数量以及内存在各个内存域之间分配情况的信息。 所有平台上都
+ * 实现了特定于体系结构的NODE_DATA宏，用于通过结点编号， 来查询与一个
+ * NUMA结点相关的pgdat_t实例
+ * */
 asmlinkage void __init start_kernel(void)
 {
 	char * command_line;
@@ -533,9 +543,11 @@ asmlinkage void __init start_kernel(void)
 	page_address_init();
 	printk(KERN_NOTICE);
 	printk(linux_banner);
+	/* 特定于体系结构的设置函数，其中一项任务是负责初始化自举分配器 */
 	setup_arch(&command_line);
 	setup_command_line(command_line);
 	unwind_setup();
+	/* per_cpu变量相关，在非SMP上是一个空操作 */
 	setup_per_cpu_areas();
 	smp_prepare_boot_cpu();	/* arch-specific boot-cpu hooks */
 
@@ -550,6 +562,7 @@ asmlinkage void __init start_kernel(void)
 	 * fragile until we cpu_idle() for the first time.
 	 */
 	preempt_disable();
+	/* 建立节点和内存域的数据结构 */
 	build_all_zonelists();
 	page_alloc_init();
 	printk(KERN_NOTICE "Kernel command line: %s\n", boot_command_line);
@@ -606,8 +619,15 @@ asmlinkage void __init start_kernel(void)
 #endif
 	vfs_caches_init_early();
 	cpuset_init_early();
+	/* 停用bootmem分配器并迁移到实际的内存管理函数 */
 	mem_init();
+	/* 初始化用于小块内存区的分配器 */
 	kmem_cache_init();
+	/* 从上文提到的struct zone，为pageset数组的第一个数组元素分配内存。
+	 * 分配第一个数组元素，换句话说就是为第一个处理器分配。系统的所有
+	 * 内存都会考虑进来。在SMP系统上对于其他CPU的pageset成员，将会在
+	 * 相应的CPU激活时初始化。该函数还负责设置冷热分配器的限制。
+	 * */
 	setup_per_cpu_pageset();
 	numa_policy_init();
 	if (late_time_init)

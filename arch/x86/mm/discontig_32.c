@@ -298,6 +298,13 @@ unsigned long __init setup_memory(void)
 	printk("kva_start_pfn ~ %ld find_max_low_pfn() ~ %ld\n",
 		kva_start_pfn, max_low_pfn);
 	printk("max_pfn = %ld\n", max_pfn);
+	/*
+	 * 直接映射的边界由high_memory指定。
+	 * max_low_pfn 指定了物理内存数量小于896M的系统上内存页的数目，该
+	 * 值的上界受限于896M可容纳的最大页数（find_max_low_pfn给出）。如果
+	 * 启用了高端内存支持，则 high_memory表示两个内存区之间的边界，总是
+	 * 896M
+	 * */
 #ifdef CONFIG_HIGHMEM
 	highstart_pfn = highend_pfn = max_pfn;
 	if (max_pfn > system_max_low_pfn)

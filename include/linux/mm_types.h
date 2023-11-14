@@ -34,18 +34,35 @@ typedef unsigned long mm_counter_t;
  * who is mapping it.
  */
 struct page {
+	/* 一些独立于体系结构的标志位，例如PG_locked */
 	unsigned long flags;		/* Atomic flags, some possibly
 					 * updated asynchronously */
+	/* 是一个使用计数， 表示内核中引用该页的次数。 在其值到达0时，
+	 * 内核就知道page实例当前不使用， 因此可以删除。 如果其值大于0，
+	 * 该实例决不会从内存删除 */
 	atomic_t _count;		/* Usage count, see below. */
+	/* C语言的联合很适合于该问题， 尽管它未能增加struct page的清晰程度。 考虑一个例子：
+	 * 一个物理内存页能够通过多个地方的不同页表映射到虚拟地址空间， 内核想要跟踪有多少地
+	 * 方映射了该页。 为此， structpage中有一个计数器用于计算映射的数目。 如果一页用于slub
+	 * 分配器（将整页细分为更小部分的一种方法，请参见3.6.1节） ， 那么可以确保只有内核会
+	 * 使用该页， 而不会有其他地方使用， 因此映射计数信息就是多余的。
+	 * 因此内核可以重新解释该字段， 用来表示该页被细分为多少个小的内存对象使用  */
 	union {
+		/* 内存管理子系统中映射的页表项计数，表示页表中有多少项指向该页
+		 * 用于表示页是否已经映射， 还用于限制逆向映射搜索*/
 		atomic_t _mapcount;	/* Count of ptes mapped in mms,
 					 * to show when page is mapped
 					 * & limit reverse map searches.
 					 */
+		/* 用于SLUB分配器： 对象的数目 */
 		unsigned int inuse;	/* SLUB: Nr of objects */
 	};
 	union {
 	    struct {
+		/* 由映射私有， 不透明数据：
+		 * 如果设置了PagePrivate， 通常用于buffer_heads；
+		 * 如果设置了PageSwapCache， 则用于swp_entry_t；
+		 * 如果设置了PG_buddy， 则用于表示伙伴系统中的阶 */
 		unsigned long private;		/* Mapping-private opaque data:
 					 	 * usually used for buffer_heads
 						 * if PagePrivate set; used for
@@ -53,6 +70,17 @@ struct page {
 						 * indicates order in the buddy
 						 * system if PG_buddy is set.
 						 */
+		/* 如果最低位为0， 则指向inode address_space， 或为NULL。
+		 * 如果页映射为匿名内存， 最低位置位，而且该指针指向anon_vma对象：
+		 * 参见下文的PAGE_MAPPING_ANON。(struct address_space)实例总是对齐
+		 * 到sizeof(long)，故而指向它的指针最低位一定是0
+		 * 地址空间是一个非常一般的概念，例如，可以用在向内存读取文件时，
+		 * 地址空间用于将文件的数据与装载数据的内存区关联起来。通过最低位，
+		 * mapping不仅能够保存一个指针，而且还能包含一些额外的信息，用于判断
+		 * 是否属于未关联到地址空间的某个匿名内存区（anon_vma），该结构对实现
+		 * 匿名页的逆向映射很重要，将在4.11.2 阐述，如果使用了最低位，内核使用
+		 * 这样的代码来恢复指针：
+		 * anon_vma = (strucr anon_vma *)(mapping - PAGE_MAPPING_ANON) */
 		struct address_space *mapping;	/* If low bit clear, points to
 						 * inode address_space, or NULL.
 						 * If page mapped as anonymous
@@ -64,13 +92,22 @@ struct page {
 #if NR_CPUS >= CONFIG_SPLIT_PTLOCK_CPUS
 	    spinlock_t ptl;
 #endif
+	    /* 用于SLUB分配器： 指向slab的指针 */
 	    struct kmem_cache *slab;	/* SLUB: Pointer to slab */
+	    /* 用于复合页的尾页， 指向首页。内核可以将多个毗连的页合并为
+	     * 较大的复合页（compound page） 。 分组中的第一个页称作首页（headpage），
+	     * 而所有其余各页叫做尾页（tail page） 。 所有尾页对应的page实例中，
+	     * 都将first_page设置为指向首页 */
 	    struct page *first_page;	/* Compound tail pages */
 	};
 	union {
+		/* index是页帧在映射内部的偏移量 */
 		pgoff_t index;		/* Our offset within mapping. */
 		void *freelist;		/* SLUB: freelist req. slab lock */
 	};
+	/* 换出页列表， 例如由zone->lru_lock保护的active_list!
+	 * lru是一个表头，以便将页面按不同类别分组，最重要的类别就是
+	 * 活动和不活动页*/
 	struct list_head lru;		/* Pageout list, eg. active_list
 					 * protected by zone->lru_lock !
 					 */
@@ -84,7 +121,17 @@ struct page {
 	 * Architectures with slow multiplication can define
 	 * WANT_PAGE_VIRTUAL in asm/page.h
 	 */
+	/* 按照预处理器语句#if defined(WANT_PAGE_VIRTUAL)， 只有定义了对应的宏，
+	 * ‘’virtual才能成为struct page的一部分。 当前只有几个体系结构是这样，
+	 * 即摩托罗拉m68k、 FRV和Extensa。所有其他体系结构都采用了一种不同的方
+	 * 案来寻址虚拟内存页。 其核心是用来查找所有高端内存页帧的散列表。
+	 * 3.5.8节会更详细地研究该技术。 处理散列表需要一些数学运算， 在前述的
+	 * 计算机上比较慢， 因此只能选择这种直接的方法。
+	 * */
 #if defined(WANT_PAGE_VIRTUAL)
+	/* 用于高端内存域的页，换言之，即无法直接映射到内核内存中的页，virtual
+	 * 用于存储该页的虚拟地址 */
+	/* 内核虚拟地址（如果没有映射则为NULL， 即高端内存） */
 	void *virtual;			/* Kernel virtual address (NULL if
 					   not kmapped, ie. highmem) */
 #endif /* WANT_PAGE_VIRTUAL */

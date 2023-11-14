@@ -423,11 +423,23 @@ static void __init pagetable_init (void)
 
 	/* Enable PGE if available */
 	if (cpu_has_pge) {
+		/* 如有可能， 内核页会设置另一个属性（_PAGE_GLOBAL） ，
+		 * 这也是__PAGE_KERNEL和__PAGE_KERNEL_EXEC变量中__PAGE_GLOBAL
+		 * 比特位已经置位的原因。 这些变量指定内核自身分配页帧时的标志
+		 * 集， 因此这些设置会自动地应用到内核页。在上下文切换期间，
+		 * 设置了_PAGE_GLOBAL位的页， 对应的TLB缓存项不从TLB刷出。
+		 * 由于内核总是出现于虚拟地址空间中同样的位置， 这提高了系统
+		 * 性能。 由于必须使内核数据尽快可用， 这种效果也是很受欢迎的
+		 * */
 		set_in_cr4(X86_CR4_PGE);
 		__PAGE_KERNEL |= _PAGE_GLOBAL;
 		__PAGE_KERNEL_EXEC |= _PAGE_GLOBAL;
 	}
 
+	/* 将物理内存页（或前896 MiB， 正如前文的讨论） 映射到虚拟地址
+	 * 空间中从PAGE_OFFSET开始的位置。 内核接下来扫描各个页目录的
+	 * 所有相关项， 将指针设置为正确的值
+	 * */
 	kernel_physical_mapping_init(pgd_base);
 	remap_numa_kva();
 
@@ -439,6 +451,7 @@ static void __init pagetable_init (void)
 	end = (FIXADDR_TOP + PMD_SIZE - 1) & PMD_MASK;
 	page_table_range_init(vaddr, end, pgd_base);
 
+	/* 建立固定映射项和持久内核映射对应的内存区。 同样是用适当的值填充页表 */
 	permanent_kmaps_init(pgd_base);
 
 	paravirt_pagetable_setup_done(pgd_base);
@@ -579,6 +592,10 @@ void __init paging_init(void)
 
 	pagetable_init();
 
+	/* 在用pagetable_init完成页表初始化之后， 则将cr3寄存器设置为
+	 * 指向全局页目录（swapper_pg_dir） 的指针。 此时必须激活新的
+	 * 页表。 在IA-32计算机上cr3寄存器重赋值刚好有这样的效果
+	 * */
 	load_cr3(swapper_pg_dir);
 
 #ifdef CONFIG_X86_PAE
@@ -589,8 +606,17 @@ void __init paging_init(void)
 	if (cpu_has_pae)
 		set_in_cr4(X86_CR4_PAE);
 #endif
+	/* 由于TLB缓存项仍然包含了启动时分配的一些内存地址数据，
+	 * 此时也必须刷出。 __flush_all_tlb可完成所需的工作。
+	 * 与上下文切换期间相反， 设置了_PAGE_GLOBAL位的页也要刷出
+	 * */
 	__flush_tlb_all();
 
+	/* kmap_init初始化全局变量kmap_pte。 在从高端内存域将页映射
+	 * 到内核地址空间时， 会使用该变量存入相应内存区的页表项。
+	 * 此外， 用于高端内存内核映射的第一个固定映射内存区的地址
+	 * 保存在全局变量kmem_vstart中
+	 * */
 	kmap_init();
 }
 

@@ -34,6 +34,14 @@
  */
 #define PAGE_ALLOC_COSTLY_ORDER 3
 
+/* 类型MIGRATE_UNMOVABLE、 MIGRATE_RECLAIMABLE和MIGRATE_MOVABLE已经介绍过。
+ * 如果向具有特定可移动性的列表请求分配内存失败， 这种紧急情况下可从
+ * MIGRATE_RESERVE分配内存（对应的列表在内存子系统初始化期间用
+ * setup_zone_migrate_reserve填充， 我不会详细讨论相关的细节） 。
+ * MIGRATE_ISOLATE是一个特殊的虚拟区域， 用于跨越NUMA结点移动物理内存页。
+ * 在大型系统上， 它有益于将物理内存页移动到接近于使用该页最频繁的CPU。
+ * MIGRATE_TYPES只是表示迁移类型的数目， 也不代表具体的区域
+ * */
 #define MIGRATE_UNMOVABLE     0
 #define MIGRATE_RECLAIMABLE   1
 #define MIGRATE_MOVABLE       2
@@ -56,7 +64,9 @@ static inline int get_pageblock_migratetype(struct page *page)
 }
 
 struct free_area {
+	/* 用于连接空闲页的链表，页链表包含大小相同的连续内存区 */
 	struct list_head	free_list[MIGRATE_TYPES];
+	/* 空闲页块的数量，单位是order次方 */
 	unsigned long		nr_free;
 };
 
@@ -105,6 +115,10 @@ enum zone_stat_item {
 #endif
 	NR_VM_ZONE_STAT_ITEMS };
 
+/* count记录了与该列表相关的页的数目， high是一个水印。 如果count的值超出了high
+ * 则表明列表中的页太多了。 对容量过低的状态没有显式使用水印：
+ * 如果列表中没有成员， 则重新填充
+ * 如有可能， CPU的高速缓存不是用单个页来填充的， 而是用多个页组成的块 */
 struct per_cpu_pages {
 	int count;		/* number of pages in the list */
 	int high;		/* high watermark, emptying needed */
@@ -112,6 +126,17 @@ struct per_cpu_pages {
 	struct list_head list;	/* the list of pages */
 };
 
+/*
+ * struct zone的pageset成员用于实现冷热分配器（hot-n-cold allocator） 。
+ * 内核说页是热的， 意味着页已经加载到CPU高速缓存， 与在内存中的页相比，
+ * 其数据能够更快地访问。 相反， 冷页则不在高速缓存中。 在多处理器系统上
+ * 每个CPU都有一个或多个高速缓存， 各个CPU的管理必须是独立的
+ * struct zone的pageset成员用于实现冷热分配器（hot-n-cold allocator） 。
+ * 内核说页是热的， 意味着页已经加载到CPU高速缓存， 与在内存中的页相比，
+ * 其数据能够更快地访问。 相反， 冷页则不在高速缓存中。 在多处理器系统上
+ * 每个CPU都有一个或多个高速缓存， 各个CPU的管理必须是独立的
+ * 所以zone里面，pageset是一个数组， 其容量与系统能够容纳的CPU数目的最大值相同
+ * */
 struct per_cpu_pageset {
 	struct per_cpu_pages pcp[2];	/* 0: hot.  1: cold */
 #ifdef CONFIG_NUMA
@@ -149,6 +174,10 @@ enum zone_type {
 	 * i386, x86_64 and multiple other arches
 	 * 			<16M.
 	 */
+	/* 标记适合DMA的内存域。 该区域的长度依赖于处理器类型。 在IA-32计算机上，
+	 * 一般的限制是16 MiB， 这是由古老的ISA设备强加的边界。 但更现代的计算机
+	 * 也可能受这一限制的影响
+	 * */
 	ZONE_DMA,
 #endif
 #ifdef CONFIG_ZONE_DMA32
@@ -157,6 +186,10 @@ enum zone_type {
 	 * only able to do DMA to the lower 16M but also 32 bit devices that
 	 * can only do DMA areas below 4G.
 	 */
+	/* 标记了使用32位地址字可寻址、 适合DMA的内存域。 显然， 只有在64位系统上，
+	 * 两种DMA内存域才有差别。 在32位计算机上， 本内存域是空的， 即长度为0 MiB。
+	 * 在Alpha和AMD64系统
+	 * */
 	ZONE_DMA32,
 #endif
 	/*
@@ -164,6 +197,11 @@ enum zone_type {
 	 * performed on pages in ZONE_NORMAL if the DMA devices support
 	 * transfers to all addressable memory.
 	 */
+	/* 标记了可直接映射到内核段的普通内存域。 这是在所有体系结构上保证都会
+	 * 存在的唯一内存域， 但无法保证该地址范围对应了实际的物理内存。 例如，
+	 * 如果AMD64系统有2 GiB内存， 那么所有内存都属于ZONE_DMA32范围， 而
+	 * ZONE_NORMAL则为空
+	 * */
 	ZONE_NORMAL,
 #ifdef CONFIG_HIGHMEM
 	/*
@@ -176,6 +214,7 @@ enum zone_type {
 	 */
 	ZONE_HIGHMEM,
 #endif
+	/* 在防止物理内存碎片的机制中需要使用 */
 	ZONE_MOVABLE,
 	MAX_NR_ZONES
 };
@@ -213,6 +252,12 @@ enum zone_type {
 
 struct zone {
 	/* Fields commonly accessed by the page allocator */
+	/* pages_min、 pages_high、 pages_low是页换出时使用的“水印”。 如果内存不足，
+	 * 内核可以将页写到硬盘。 这3个成员会影响交换守护进程的行为。
+	 * 1. 如果空闲页多于pages_high， 则内存域的状态是理想的
+	 * 2. 如果空闲页的数目低于pages_low， 则内核开始将页换出到硬盘
+	 * 3. 如果空闲页的数目低于pages_min， 那么页回收工作的压力就比较大，
+	 *    因为内存域中急需空闲页*/
 	unsigned long		pages_min, pages_low, pages_high;
 	/*
 	 * We don't know if the memory that we're going to allocate will be freeable
@@ -222,8 +267,20 @@ struct zone {
 	 * on the higher zones). This array is recalculated at runtime if the
 	 * sysctl_lowmem_reserve_ratio sysctl changes.
 	 */
+	/* lowmem_reserve数组分别为各种内存域指定了若干页， 用于一些无论如何都不能失败的
+	 * 关键性内存分配。 各个内存域的份额根据重要性确定 init_per_zone_pages_min
+	 * 这个值起始就是 /proc/sys/vm/min_free_kbytes
+	 * pages_min即按页计算的min_free_kbytes P116
+	 * */
 	unsigned long		lowmem_reserve[MAX_NR_ZONES];
 
+	/* pageset是一个数组， 用于实现每个CPU的热/冷页帧列表。 内核使用这些列表来保存可
+	 * 用于满足实现的“新鲜”页。 但冷热页帧对应的高速缓存状态不同： 有些页帧也很可能仍然
+	 * 在高速缓存中， 因此可以快速访问， 故称之为热的； 未缓存的页帧与此相对，
+	 * 故称之为冷的 */
+	/* NR_CPUS是一个可以在编译时间配置的宏常数。 在单处理器系统上其值总是1， 针对SMP
+	 * 系统编译的内核中， 其值可能在2和32（在64位系统上是64） 之间。
+	 * 该值并不是系统中实际存在的CPU数目， 而是内核支持的CPU的最大数目 */
 #ifdef CONFIG_NUMA
 	int node;
 	/*
@@ -243,6 +300,8 @@ struct zone {
 	/* see spanned/present_pages for more description */
 	seqlock_t		span_seqlock;
 #endif
+	/* free_area是同名数据结构的数组， 用于实现伙伴系统。 每个数组元素都表示某种固定长度
+	 * 的一些连续内存区。 对于包含在每个区域中的空闲内存页的管理， free_area是一个起点 */
 	struct free_area	free_area[MAX_ORDER];
 
 #ifndef CONFIG_SPARSEMEM
@@ -250,22 +309,39 @@ struct zone {
 	 * Flags for a pageblock_nr_pages block. See pageblock-flags.h.
 	 * In SPARSEMEM, this map is stored in struct mem_section
 	 */
+	/* 每个内存域都提供了一个特殊的字段， 可以跟踪包含pageblock_nr_pages个页
+	 * 的内存区的属性 */
 	unsigned long		*pageblock_flags;
 #endif /* CONFIG_SPARSEMEM */
 
 
 	ZONE_PADDING(_pad1_)
+	/* 第二部分涉及的结构成员，用来根据活动情况对内存域中使用的页进行编目。如果页面
+	 * 访问频繁，则内核认为它是活动的，而不活动则相反。在需要换出页面的时候，如果可
+	 * 能，频繁使用的页应该保持不动，而多余的不活动的页面则可以换出而没什么损害 */
 
 	/* Fields commonly accessed by the page reclaim scanner */
 	spinlock_t		lru_lock;	
+	/* active_list是活动页的集合， 而inactive_list则不活动页的集合（page实例） */
 	struct list_head	active_list;
 	struct list_head	inactive_list;
+	/* nr_scan_active和nr_scan_inactive指定在回收内存时需要扫描的活动和不活动页的数目 */
 	unsigned long		nr_scan_active;
 	unsigned long		nr_scan_inactive;
+	/* pages_scanned指定了上次换出一页以来， 有多少页未能成功扫描 */
 	unsigned long		pages_scanned;	   /* since last reclaim */
+	/* flags描述内存域的当前状态。 允许使用下列标志 */
 	unsigned long		flags;		   /* zone flags, see below */
 
 	/* Zone statistics */
+	/* vm_stat维护了大量有关该内存域的统计信息。 由于其中维护的大部分信息目前没有多大
+	 * 意义， 对该结构的详细讨论则延迟到17.7.1节。 现在， 只要知道内核中很多地方都会
+	 * 更新其中的信息即可。辅助函数zone_page_state用来读取vm_stat中的信息:
+	 * 例如， 可以将item参数设置为NR_ACTIVE或NR_INACTIVE， 来查询存储在上文讨论的
+	 * active_list和inactive_list中的活动和不活动页的数目。 而设置为NR_FREE_PAGES则可
+	 * 以获得内存域中空闲页的数目
+	 * zone_page_state(struct zone *zone, enum zone_stat_item item)
+	 * */
 	atomic_long_t		vm_stat[NR_VM_ZONE_STAT_ITEMS];
 
 	/*
@@ -281,6 +357,9 @@ struct zone {
 	 * Access to both this field is quite racy even on uniprocessor.  But
 	 * it is expected to average out OK.
 	 */
+	/* prev_priority存储了上一次扫描操作扫描该内存域的优先级， 扫描操作是由try_to_free_pages
+	 * 进行的， 直至释放足够的页帧（参见3.5.5节和第18章） 。 读者在第18章会看到， 扫描会根据
+	 * 该值判断是否换出映射的页 */
 	int prev_priority;
 
 
@@ -311,6 +390,9 @@ struct zone {
 	 * primary users of these fields, and in mm/page_alloc.c
 	 * free_area_init_core() performs the initialization of them.
 	 */
+	/* wait_table、 wait_table_bits和wait_table_hash_nr_entries实现了一个等待队列， 可用于
+	 * 等待某一页变为可用进程。 该机制的细节将在第14章给出， 直观的概念是很好理解的： 进程排
+	 * 成一个队列， 等待某些条件。 在条件变为真时， 内核会通知进程恢复工作 */
 	wait_queue_head_t	* wait_table;
 	unsigned long		wait_table_hash_nr_entries;
 	unsigned long		wait_table_bits;
@@ -318,8 +400,10 @@ struct zone {
 	/*
 	 * Discontig memory support fields.
 	 */
+	/* 内存域和父结点之间的关联由zone_pgdat建立， zone_pgdat指向对应的pg_list_data实例 */
 	struct pglist_data	*zone_pgdat;
 	/* zone_start_pfn == zone_start_paddr >> PAGE_SHIFT */
+	/* zone_start_pfn是内存域第一个页帧的索引 */
 	unsigned long		zone_start_pfn;
 
 	/*
@@ -332,6 +416,9 @@ struct zone {
 	 * frequently read in proximity to zone->lock.  It's good to
 	 * give them a chance of being in the same cacheline.
 	 */
+	/* spanned_pages指定内存域中页的总数， 但并非所有都是可用的。 前文提到过， 内存域中可能
+	 * 有一些小的空洞。 另一个计数器（present_pages） 则给出了实际上可用的页数目。 该计数器
+	 * 的值通常与spanned_pages相同 */
 	unsigned long		spanned_pages;	/* total size, including holes */
 	unsigned long		present_pages;	/* amount of memory (excluding holes) */
 
@@ -340,6 +427,22 @@ struct zone {
 	 */
 	const char		*name;
 } ____cacheline_internodealigned_in_smp;
+
+/* 也有可能这些标志均未设置。 这是内存域的正常状态。 ZONE_ALL_UNRECLAIMABLE状态出现在内核试
+ * 图重用该内存域的一些页时（页面回收， 参见第18章） ， 但因为所有的页都被钉住而无法回收。 例
+ * 如， 用户空间应用程序可以使用mlock系统调用通知内核页不能从物理内存移出， 比如换出到磁盘上。
+ * 这样的页称之为钉住的。 如果一个内存域中的所有页都被钉住， 那么该内存域是无法回收的， 即设置该
+ * 标志。 为不浪费时间， 交换守护进程在寻找可供回收的页时， 只会简要地扫描一下此类内存域
+ * 扫描是无法完全省去的， 因为该内存域经过若干时间后， 在将来可能再次包含可回收的页。 倘若如此，
+ * 则消除该标志， 而kswapd守护进程会将该内存域与其他内存域同等对待
+ *
+ * 在SMP系统上， 多个CPU可能试图并发地回收一个内存域。 ZONE_RECLAIM_LOCKED标志可防止这种情况：
+ * 如果一个CPU在回收某个内存域， 则设置该标志。 这防止了其他CPU的尝试
+ *
+ * ZONE_OOM_LOCKED专用于某种不走运的情况： 如果进程消耗了大量的内存， 致使必要的操作都无法完
+ * 成， 那么内核会试图杀死消耗内存最多的进程， 以获得更多的空闲页。 该标志可以防止多个CPU同时进
+ * 行这种操作
+ * */
 
 typedef enum {
 	ZONE_ALL_UNRECLAIMABLE,		/* all pages pinned */
@@ -480,6 +583,9 @@ struct zonelist_cache;
 
 struct zonelist {
 	struct zonelist_cache *zlcache_ptr;		     // NULL or &zlcache
+	/* 由于该备用列表必须包括所有结点的所有内存域，
+	 * 因此由MAX_NUMNODES * MAX_NZ_ZONES项组成，
+	 * 外加一个用于标记列表结束的空指针 */
 	struct zone *zones[MAX_ZONES_PER_ZONELIST + 1];      // NULL delimited
 #ifdef CONFIG_NUMA
 	struct zonelist_cache zlcache;			     // optional ...
@@ -505,6 +611,8 @@ static inline int alloc_should_filter_zonelist(struct zonelist *zonelist)
 #endif /* CONFIG_NUMA */
 
 #ifdef CONFIG_ARCH_POPULATES_NODE_MAP
+/* start_pfn和end_pfn标记了一个连续内存区中的第一个和最后一个页帧，
+ * nid是该内存区所属结点的NUMA ID。 UMA系统设置为0 */
 struct node_active_region {
 	unsigned long start_pfn;
 	unsigned long end_pfn;
@@ -530,12 +638,28 @@ extern struct page *mem_map;
  */
 struct bootmem_data;
 typedef struct pglist_data {
+	/* node_zones是一个数组， 包含了结点中各内存域的数据结构
+	 * 结点的内存域保存在node_zones[MAX_NR_ZONES]。 该数组总是
+	 * 有3个项， 即使结点没有那么多内存域， 也是如此。 如果不
+	 * 足3个， 则其余的数组项用0填充*/
 	struct zone node_zones[MAX_NR_ZONES];
+	/* node_zonelists指定了备用结点及其内存域的列表，
+	 * 以便在当前结点没有可用空间时， 在备用结点分配内存。
+	 * node_zonelists数组对每种可能的内存域类型， 都配置了
+	 * 一个独立的数组项。 数组项包含了类型为zonelist的一个备用列表
+	 * */
 	struct zonelist node_zonelists[MAX_ZONELISTS];
+	/* 结点中不同内存域的数目保存在nr_zones */
 	int nr_zones;
 #ifdef CONFIG_FLAT_NODE_MEM_MAP
+	/* node_mem_map是指向page实例数组的指针，用于描述结点的所有
+	 * 物理内存页。 它包含了结点中所有内存域的页 */
 	struct page *node_mem_map;
 #endif
+	/* 在系统启动期间， 内存管理子系统初始化之前， 内核也需要使用
+	 * 内存（另外， 还必须保留部分内存用于初始化内存管理子系统） 。
+	 * 为解决这个问题， 内核使用了3.4.3节讲解的自举内存分配器
+	 * bdata指向自举内存分配器数据结构的实例 */
 	struct bootmem_data *bdata;
 #ifdef CONFIG_MEMORY_HOTPLUG
 	/*
@@ -547,11 +671,22 @@ typedef struct pglist_data {
 	 */
 	spinlock_t node_size_lock;
 #endif
+	/* node_start_pfn是该NUMA结点第一个页帧的逻辑编号。 系统中所有结点的
+	 * 页帧是依次编号的， 每个页帧的号码都是全局唯一的（不只是结点内唯一）
+	 * node_start_pfn在UMA系统中总是0， 因为其中只有一个结点， 因此其第一
+	 * 个页帧编号总是0。node_present_pages指定了结点中页帧的数目， 而
+	 * node_spanned_pages则给出了该结点以页帧为单位计算的长度。 二者的值不
+	 * 一定相同， 因为结点中可能有一些空洞， 并不对应真正的页帧*/
 	unsigned long node_start_pfn;
 	unsigned long node_present_pages; /* total number of physical pages */
 	unsigned long node_spanned_pages; /* total size of physical page
 					     range, including holes */
+	/* node_id是全局结点ID。 系统中的NUMA结点都从0开始编号 */
 	int node_id;
+	/* kswapd_wait是交换守护进程（swap daemon） 的等待队列， 在将页帧换出结点时
+	 * 会用到（第18章会详细讨论该过程） 。 kswapd指向负责该结点的交换守护进程的
+	 * task_struct。 kswapd_max_order用于页交换子系统的实现， 用来定义需要释放的
+	 * 区域的长度（我们当前不感兴趣）  */
 	wait_queue_head_t kswapd_wait;
 	struct task_struct *kswapd;
 	int kswapd_max_order;

@@ -340,6 +340,11 @@ static inline void __nodes_remap(nodemask_t *dstp, const nodemask_t *srcp,
 /*
  * Bitmasks that are kept for all the nodes.
  */
+/*
+ * 状态N_POSSIBLE、 N_ONLINE和N_CPU用于CPU和内存的热插拔， 在本书中不考虑这些特性。
+ * 对内存管理有必要的标志是N_HIGH_MEMORY和N_NORMAL_MEMORY。 如果结点有普通或高端内
+ * 存则使用N_HIGH_MEMORY，仅当结点没有高端内存才设置N_NORMAL_MEMORY
+ * */
 enum node_states {
 	N_POSSIBLE,		/* The node could become online at some point */
 	N_ONLINE,		/* The node is online */
@@ -437,6 +442,10 @@ static inline int num_node_state(enum node_states state)
 #define node_set_online(node)	   node_set_state((node), N_ONLINE)
 #define node_set_offline(node)	   node_clear_state((node), N_ONLINE)
 
+/* 此外， 宏for_each_node_state(__node, __state)用来迭代处于特定状态的所有结点
+ * 而for_each_online_node(node)则迭代所有活动结点。如果内核编译为只支持单个结点
+ * （即使用平坦内存模型） ， 则没有结点位图， 上述操作该位图的函数则变为空操作
+ * */
 #define for_each_node(node)	   for_each_node_state(node, N_POSSIBLE)
 #define for_each_online_node(node) for_each_node_state(node, N_ONLINE)
 

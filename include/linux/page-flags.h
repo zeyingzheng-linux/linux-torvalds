@@ -67,27 +67,53 @@
  * FLAGS_RESERVED which defines the width of the fields section
  * (see linux/mmzone.h).  New flags must _not_ overlap with this area.
  */
+/* PG_locked指定了页是否锁定。 如果该比特位置位， 内核的其他部分不允许访问该页。
+ * 这防止了内存管理出现竞态条件， 例如， 在从硬盘读取数据到页帧时  */
 #define PG_locked	 	 0	/* Page is locked. Don't touch. */
+/* 如果在涉及该页的I/O操作期间发生错误 */
 #define PG_error		 1
+/* PG_referenced和PG_active控制了系统使用该页的活跃程度。
+ * 在页交换子系统选择换出页时， 该信息是很重要的 */
 #define PG_referenced		 2
+/* 表示页的数据已经从块设备读取， 其间没有出错 */
 #define PG_uptodate		 3
 
+/* 如果与硬盘上的数据相比， 页的内容已经改变， 则置位PG_dirty */
 #define PG_dirty	 	 4
+/* PG_lru有助于实现页面回收和切换。 内核使用两个最近最少使用
+ * （least recently used， lru） 链表8来区别活动和不活动页。
+ * 如果页在其中一个链表中， 则设置该比特位。 还有一个PG_active标志，
+ * 如果页在活动页链表中， 则设置该标志。
+ * 频繁使用的项自动排到链表最靠前的位置， 而不活动项总是向链表末尾方向移动 */
 #define PG_lru			 5
+/* PG_referenced和PG_active控制了系统使用该页的活跃程度。
+ * 在页交换子系统选择换出页时， 该信息是很重要的 */
 #define PG_active		 6
+/* 如果页是3.6节讨论的slab分配器的一部分， 则设置PG_slab位 */
 #define PG_slab			 7	/* slab debug (Suparna wants this) */
 
 #define PG_owner_priv_1		 8	/* Owner use. If pagecache, fs may use*/
 #define PG_arch_1		 9
 #define PG_reserved		10
+/* 如果page结构的private成员非空， 则必须设置PG_private位
+ * 用于I/O的页， 可使用该字段将页细分为多个缓冲区
+ * 但内核的其他部分也有各种不同的方法， 将私有数据附加页面上 */
 #define PG_private		11	/* If pagecache, has fs-private data */
 
+/* 如果页的内容处于向块设备回写的过程中， 则需要设置PG_writeback位 */
 #define PG_writeback		12	/* Page is under writeback */
+/* 表示该页属于一个更大的复合页， 复合页由多个毗连的普通页组成 */
 #define PG_compound		14	/* Part of a compound page */
+/* 如果页处于交换缓存， 则设置PG_swapcache位。
+ * 在这种情况下， private包含一个类型为swap_entry_t的项 */
 #define PG_swapcache		15	/* Swap page: swp_entry_t in private */
 
 #define PG_mappedtodisk		16	/* Has blocks allocated on-disk */
+/* 在可用内存的数量变少时， 内核试图周期性地回收页， 即剔除不活动、 未用的页
+ * 在内核决定回收某个特定的页之后， 需要设置PG_reclaim标志通知 */
 #define PG_reclaim		17	/* To be reclaimed asap */
+/* 如果页空闲且包含在伙伴系统的列表中， 则设置PG_buddy位
+ * 伙伴系统是页分配机制的核心 */
 #define PG_buddy		19	/* Page is free, on buddy lists */
 
 /* PG_readahead is only used for file reads; PG_reclaim is only for writes */

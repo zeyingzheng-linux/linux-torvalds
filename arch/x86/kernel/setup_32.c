@@ -360,9 +360,22 @@ void __init zone_sizes_init(void)
 {
 	unsigned long max_zone_pfns[MAX_NR_ZONES];
 	memset(max_zone_pfns, 0, sizeof(max_zone_pfns));
+	/* MAX_DMA_ADDRESS是适用于DMA操作的最高内存地址。
+	 * 该常数声明为PAGE_OFFSET+0x1000000。 回想前文可知，
+	 * 物理内存页映射到从PAGE_OFFSET开始的虚拟地址空间，
+	 * 而物理内存的前16 MiB适合于DMA操作， 十六进制表示
+	 * 就是前0x1000000字节。 用virt_to_phys转换， 可以获
+	 * 得物理内存地址， 而右移PAGE_SHIFT位则相当于除以页
+	 * 大小， 计算最后得到适用于DMA的页数。 不出意料之外，
+	 * 在使用4 KiB页的IA-32系统上， 结果是4 096页。
+	 * */
 	max_zone_pfns[ZONE_DMA] =
 		virt_to_phys((char *)MAX_DMA_ADDRESS) >> PAGE_SHIFT;
 	max_zone_pfns[ZONE_NORMAL] = max_low_pfn;
+	/* max_low_pfn和highend_pfn是全局常量， 分别指定了低端
+	 * （如果地址空间按3∶ 1划分， 通常≤896 MiB）和高端内存
+	 * 中最高的页号
+	 * */
 #ifdef CONFIG_HIGHMEM
 	max_zone_pfns[ZONE_HIGHMEM] = highend_pfn;
 	add_active_range(0, 0, highend_pfn);
@@ -370,6 +383,10 @@ void __init zone_sizes_init(void)
 	add_active_range(0, 0, max_low_pfn);
 #endif
 
+	/* 请注意， free_area_init_nodes会合并early_mem_map和max_zone_pfns
+	 * 中的信息。 其分别选择各个内存域中的活动内存区， 并构建体系结构
+	 * 无关的数据结构
+	 * */
 	free_area_init_nodes(max_zone_pfns);
 }
 #else
@@ -612,6 +629,11 @@ void __init setup_arch(char **cmdline_p)
 	strlcpy(command_line, boot_command_line, COMMAND_LINE_SIZE);
 	*cmdline_p = command_line;
 
+	/* 有两个版本，setup_32.c 和 discontig_32.c，实现不同，但是效果一样
+	 * 1. 确定每个结点可用的物理内存页的数目
+	 * 2. 初始化bootmem分配器
+	 * 3. 接下来分配各种内存区，例如，运行第一个用户空间过程所需的最初的RAM磁盘
+	 * */
 	max_low_pfn = setup_memory();
 
 #ifdef CONFIG_VMI
@@ -635,9 +657,15 @@ void __init setup_arch(char **cmdline_p)
 #ifdef CONFIG_SMP
 	smp_alloc_memory(); /* AP processor realmode stacks in low memory*/
 #endif
+	/* 初始化内核页表并启用内存分页，通过调用pagetable_init，该函数确保
+	 * 了直接映射到内核地址空间的物理内存被初始化。
+	 * */
 	paging_init();
 	remapped_pgdat_init();
 	sparse_init();
+	/* 初始化系统中所有结点的pgdat_t实例，使用add_active_range对可用的物理
+	 * 内存建立一个相对简单的列表。free_area_init_nodes使用该信息建立完备的
+	 * 内核数据结构 */
 	zone_sizes_init();
 
 	/*
