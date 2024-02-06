@@ -46,6 +46,9 @@ void *kmap_atomic_prot(struct page *page, enum km_type type, pgprot_t prot)
 	return (void *)vaddr;
 }
 
+/* kmap可能会睡眠，但这个不会睡眠
+ * zzy：但看具体实现是会相互覆盖的，所以要求调用者自己清楚？
+ * */
 void *kmap_atomic(struct page *page, enum km_type type)
 {
 	return kmap_atomic_prot(page, type, kmap_prot);

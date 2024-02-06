@@ -161,6 +161,7 @@ int map_vm_area(struct vm_struct *area, pgprot_t prot, struct page ***pages)
 		if (err)
 			break;
 	} while (pgd++, addr = next, addr != end);
+	/* 有些体系结构在修改页表之后需要刷出CPU高速缓存 */
 	flush_cache_vmap((unsigned long) area->addr, end);
 	return err;
 }
@@ -198,6 +199,7 @@ static struct vm_struct *__get_vm_area_node(unsigned long size, unsigned long fl
 	/*
 	 * We always allocate a guard page.
 	 */
+	/* vmalloc区域之间都会由一个虚拟页隔离，不占用物理页面，防错 */
 	size += PAGE_SIZE;
 
 	write_lock(&vmlist_lock);
@@ -450,6 +452,7 @@ void *__vmalloc_area_node(struct vm_struct *area, gfp_t gfp_mask,
 		return NULL;
 	}
 
+	/* 所以就是一页一页的分配 */
 	for (i = 0; i < area->nr_pages; i++) {
 		if (node < 0)
 			area->pages[i] = alloc_page(gfp_mask);
@@ -462,6 +465,7 @@ void *__vmalloc_area_node(struct vm_struct *area, gfp_t gfp_mask,
 		}
 	}
 
+	/* 建立映射 */
 	if (map_vm_area(area, prot, &pages))
 		goto fail;
 	return area->addr;

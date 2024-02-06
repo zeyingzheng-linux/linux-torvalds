@@ -70,6 +70,10 @@ static void flush_all_zero_pkmaps(void)
 {
 	int i;
 
+	/* 在内核映射上执行刷出，因为内核的全局页表已经修改（在需要
+	 * 显式刷出的大多数体系结构上，将使用flush_cache_all刷出CPU
+	 * 的全部高速缓存，幸运的是许多处理器体系不需要该操作）
+	 * */
 	flush_cache_kmaps();
 
 	for (i = 0; i < LAST_PKMAP; i++) {
@@ -101,6 +105,7 @@ static void flush_all_zero_pkmaps(void)
 
 		set_page_address(page, NULL);
 	}
+	/* 刷出所有与PKMAP区域相关的TLB项目 */
 	flush_tlb_kernel_range(PKMAP_ADDR(0), PKMAP_ADDR(LAST_PKMAP));
 }
 
@@ -121,9 +126,14 @@ static inline unsigned long map_new_virtual(struct page *page)
 start:
 	count = LAST_PKMAP;
 	/* Find an empty entry */
+	/* 找一个空位，找不到就睡觉，毕竟虚拟地址位置有限 */
 	for (;;) {
 		last_pkmap_nr = (last_pkmap_nr + 1) & LAST_PKMAP_MASK;
 		if (!last_pkmap_nr) {
+			/* 到达最大值后，从0开始搜索，在这种情况下
+			 * 需要刷出CPU高速缓存，因为你会发现 k_umap
+			 * 最多把计数改到1，最终的释放映射还是在这里
+			 * */
 			flush_all_zero_pkmaps();
 			count = LAST_PKMAP;
 		}
@@ -154,10 +164,13 @@ start:
 		}
 	}
 	vaddr = PKMAP_ADDR(last_pkmap_nr);
+	/* 修改内核页表，将该页映射在指定位置，但尚未更新TLB */
 	set_pte_at(&init_mm, vaddr,
 		   &(pkmap_page_table[last_pkmap_nr]), mk_pte(page, kmap_prot));
 
+	/* 设置为1，意味着该页已分配但无法使用，因为TLB项未更新 */
 	pkmap_count[last_pkmap_nr] = 1;
+	/* 将该页添加到持久内核映射的数据结构 */
 	set_page_address(page, (void *)vaddr);
 
 	return vaddr;
@@ -234,6 +247,9 @@ EXPORT_SYMBOL(kunmap_high);
 /*
  * Describes one page->virtual association
  */
+/* 该结构用于建立 page->virtual的映射，page是一个指向全局mem_map数组
+ * 中的Page实例的指针，virtual指定了该页在内核虚拟地址空间中分配位置
+ * */
 struct page_address_map {
 	struct page *page;
 	void *virtual;
@@ -271,6 +287,10 @@ void *page_address(struct page *page)
 	pas = page_slot(page);
 	ret = NULL;
 	spin_lock_irqsave(&pas->lock, flags);
+	/* 映射保存在散列表中，结构中的链表元素用于建立溢出链表，
+	 * 以处理散列碰撞。
+	 * 该散列表通过page_address_htable数组实现。
+	 * */
 	if (!list_empty(&pas->lh)) {
 		struct page_address_map *pam;
 

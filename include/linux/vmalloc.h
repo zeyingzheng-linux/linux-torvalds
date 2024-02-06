@@ -30,6 +30,7 @@ struct vm_struct {
 	unsigned long		flags;
 	struct page		**pages;
 	unsigned int		nr_pages;
+	/* ioremap时候才需要 */
 	unsigned long		phys_addr;
 };
 

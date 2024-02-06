@@ -16,6 +16,7 @@ struct vm_area_struct;
  * without the underscores and use the consistently. The definitions here may
  * be used in bit comparisons.
  */
+/* 没有 __GFP_NORMAL，但是内存分配的主要负担却落在 ZONE_NORMAL内存域 */
 #define __GFP_DMA	((__force gfp_t)0x01u)
 #define __GFP_HIGHMEM	((__force gfp_t)0x02u)
 #define __GFP_DMA32	((__force gfp_t)0x04u)
@@ -34,21 +35,40 @@ struct vm_area_struct;
  * __GFP_MOVABLE: Flag that this page will be movable by the page migration
  * mechanism or reclaimed
  */
+/* 分配器可以在返回内存之前在队列上等待一个时间，即睡眠，也可以被中断（重调度） */
 #define __GFP_WAIT	((__force gfp_t)0x10u)	/* Can wait and reschedule? */
+/* 如果分配失败会给内核带来严重后果，应该用该标志（代表应该访问紧急分配池） */
 #define __GFP_HIGH	((__force gfp_t)0x20u)	/* Should access emergency pools? */
+/* 允许IO，如果内核在内存分配期间换出页，那么当这个标志设置，才能将选择的页写入磁盘 */
 #define __GFP_IO	((__force gfp_t)0x40u)	/* Can start physical IO? */
+/* 允许执行VFS操作，在与VFS由联系的内核系统中必须禁用，因为可能递归调用 */
 #define __GFP_FS	((__force gfp_t)0x80u)	/* Can call down to low-level FS? */
 #define __GFP_COLD	((__force gfp_t)0x100u)	/* Cache-cold page required */
 #define __GFP_NOWARN	((__force gfp_t)0x200u)	/* Suppress page allocation failure warning */
+/* 分配失败后自动重试，但在尝试若干次之后会停止 */
 #define __GFP_REPEAT	((__force gfp_t)0x400u)	/* Retry the allocation.  Might fail */
+/* 分配失败后一直重试，直到成功 */
 #define __GFP_NOFAIL	((__force gfp_t)0x800u)	/* Retry for ever.  Cannot fail */
 #define __GFP_NORETRY	((__force gfp_t)0x1000u)/* Do not retry.  Might fail */
 #define __GFP_COMP	((__force gfp_t)0x4000u)/* Add compound page metadata */
+/* 将返回的页面清0，利用clear_page，可能会是架构相关代码 */
 #define __GFP_ZERO	((__force gfp_t)0x8000u)/* Return zeroed page on success */
+/* 不使用紧急分配链 */
 #define __GFP_NOMEMALLOC ((__force gfp_t)0x10000u) /* Don't use emergency reserves */
+/* 只在NUMA系统上有意义。它限制只在分配到当前进程的各个CPU关联的结点上分配内存，如果
+ * 进程允许在所有CPU上运行（默认情况），该标志没有意义，只有进程可以运行的CPU受限了，
+ * 该标志才有效果。
+ * */
 #define __GFP_HARDWALL   ((__force gfp_t)0x20000u) /* Enforce hardwall cpuset memory allocs */
+/* 只有在NUMA系统上有意义。如果设置该标志，内存分配失败的情况下不允许使用其他节点作为
+ * 备用，需要保证在当前节点或者明确指定的结点上成功分配内存。
+ * */
 #define __GFP_THISNODE	((__force gfp_t)0x40000u)/* No fallback, no policies */
+/* __GFP_RECLAIMABLE和__GFP_MOVABLE是页迁移机制需要的标志。它们分别将分配的内存标记为
+ * 可回收的或者可移动的，这影响从空闲列表的哪个子表获得内存  */
 #define __GFP_RECLAIMABLE ((__force gfp_t)0x80000u) /* Page is reclaimable */
+/* __GFP_MOVABLE 不表示物理内存域，但是内核应该在特殊的虚拟内存域
+ * ZONE_MOVABL域进行相应的分配，见 gfp_zone，为了反碎片机制而存在 */
 #define __GFP_MOVABLE	((__force gfp_t)0x100000u)  /* Page is movable */
 
 #define __GFP_BITS_SHIFT 21	/* Room for 21 __GFP_FOO bits */
@@ -57,7 +77,9 @@ struct vm_area_struct;
 /* This equals 0, but use constants in case they ever change */
 #define GFP_NOWAIT	(GFP_ATOMIC & ~__GFP_HIGH)
 /* GFP_ATOMIC means both !wait (__GFP_WAIT not set) and use emergency pool */
+/* 没有设置__GFP_WAIT，意味着不能中断，可以使用紧急分配链的内存 */
 #define GFP_ATOMIC	(__GFP_HIGH)
+/* NOIO/NOFS分配禁止 IO操作和访问 VFS层，但设置了WAIT，因此可以被中断 */
 #define GFP_NOIO	(__GFP_WAIT)
 #define GFP_NOFS	(__GFP_WAIT | __GFP_IO)
 #define GFP_KERNEL	(__GFP_WAIT | __GFP_IO | __GFP_FS)
@@ -66,6 +88,7 @@ struct vm_area_struct;
 #define GFP_USER	(__GFP_WAIT | __GFP_IO | __GFP_FS | __GFP_HARDWALL)
 #define GFP_HIGHUSER	(__GFP_WAIT | __GFP_IO | __GFP_FS | __GFP_HARDWALL | \
 			 __GFP_HIGHMEM)
+/* 类似GFP_HIGHUSER，但分配将从 ZONE_MOVABLE进行 */
 #define GFP_HIGHUSER_MOVABLE	(__GFP_WAIT | __GFP_IO | __GFP_FS | \
 				 __GFP_HARDWALL | __GFP_HIGHMEM | \
 				 __GFP_MOVABLE)
@@ -188,6 +211,8 @@ static inline struct page *alloc_pages_node(int nid, gfp_t gfp_mask,
 	if (unlikely(order >= MAX_ORDER))
 		return NULL;
 
+	/* 如果指定负的节点（未知节点），内核
+	 * 自动使用当前执行CPU对应的节点 */
 	/* Unknown node is current node */
 	if (nid < 0)
 		nid = numa_node_id();
