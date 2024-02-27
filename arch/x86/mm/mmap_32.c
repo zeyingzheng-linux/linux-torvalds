@@ -42,14 +42,17 @@ static inline unsigned long mmap_base(struct mm_struct *mm)
 	unsigned long gap = current->signal->rlim[RLIMIT_STACK].rlim_cur;
 	unsigned long random_factor = 0;
 
+	/* 根据栈的最大长度来计算栈最低的可能位置 */
 	if (current->flags & PF_RANDOMIZE)
 		random_factor = get_random_int() % (1024*1024);
 
+	/* 内核保证栈至少跨越128M的空间 */
 	if (gap < MIN_GAP)
 		gap = MIN_GAP;
 	else if (gap > MAX_GAP)
 		gap = MAX_GAP;
 
+	/* 开启地址空间随机化机制，还会减去一个随机的偏移量，最大1M */
 	return PAGE_ALIGN(TASK_SIZE - gap - random_factor);
 }
 
@@ -63,6 +66,11 @@ void arch_pick_mmap_layout(struct mm_struct *mm)
 	 * Fall back to the standard layout if the personality
 	 * bit is set, or if the expected stack growth is unlimited:
 	 */
+	/* 栈一般是自顶向下，堆是自下往上，主要在于中间的MMAP区域：
+	 * 经典布局：MMAP自下往上，基地址一般确定为1G
+	 * 新布局：MMAP自顶向下
+	 * MMAP向哪边，哪边就相当于可以一直扩展，不然就是个定值。
+	 * */
 	if (sysctl_legacy_va_layout ||
 			(current->personality & ADDR_COMPAT_LAYOUT) ||
 			current->signal->rlim[RLIMIT_STACK].rlim_cur == RLIM_INFINITY) {

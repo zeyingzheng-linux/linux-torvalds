@@ -807,14 +807,17 @@ static int load_elf_binary(struct linux_binprm *bprm, struct pt_regs *regs)
 	if (elf_read_implies_exec(loc->elf_ex, executable_stack))
 		current->personality |= READ_IMPLIES_EXEC;
 
+	/* 决定是不是要有虚拟地址空间随机化 */
 	if (!(current->personality & ADDR_NO_RANDOMIZE) && randomize_va_space)
 		current->flags |= PF_RANDOMIZE;
+	/* 选MMAP的布局 */
 	arch_pick_mmap_layout(current->mm);
 
 	/* Do this so that we can load the interpreter, if need be.  We will
 	   change some of these later */
 	current->mm->free_area_cache = current->mm->mmap_base;
 	current->mm->cached_hole_size = 0;
+	/* 在适当的位置创建栈，也依赖是否有地址随机化，在STACK_TOP基础上加减 */
 	retval = setup_arg_pages(bprm, randomize_stack_top(STACK_TOP),
 				 executable_stack);
 	if (retval < 0) {

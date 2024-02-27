@@ -14,10 +14,18 @@
 #define PROT_GROWSDOWN	0x01000000	/* mprotect flag: extend change to start of growsdown vma */
 #define PROT_GROWSUP	0x02000000	/* mprotect flag: extend change to end of growsup vma */
 
+/* 如果一个对象（通常是文件）在几个进程之间共享 */
 #define MAP_SHARED	0x01		/* Share changes */
+/* 创建一个与数据源分离的私有映射，对映射区域的写入操作不影响文件中的数据 */
 #define MAP_PRIVATE	0x02		/* Changes are private */
 #define MAP_TYPE	0x0f		/* Mask for type of mapping */
+/* 指定除了给定地址之外，不能将其他地址用于映射。如果没有设置该标志，
+ * 内核可以在受阻时随意改变目标地址。例如，在目标地址已经存在一个映射
+ * 的情况（否则，现存的映射将被覆盖）
+ * */
 #define MAP_FIXED	0x10		/* Interpret addr exactly */
+/* 创建与任何数据源都不相关的匿名映射，fd和off参数被忽略。此类映射可用于
+ * 为应用程序分配类似malloc所用的内存 */
 #define MAP_ANONYMOUS	0x20		/* don't use a file */
 
 #define MS_ASYNC	1		/* sync memory asynchronously */

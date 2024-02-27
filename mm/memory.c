@@ -1542,6 +1542,10 @@ static inline void cow_user_page(struct page *dst, struct page *src, unsigned lo
  * but allow concurrent faults), with pte both mapped and locked.
  * We return with mmap_sem still held, but pte unmapped and unlocked.
  */
+/* 我们考察的是一个略微简化的版本，其中省去了与交换缓存潜在的冲突，
+ * 以及一些边边角角的情况。因为这些都使问题复杂化，而无助于揭示机制
+ * 自身的本质
+ * */
 static int do_wp_page(struct mm_struct *mm, struct vm_area_struct *vma,
 		unsigned long address, pte_t *page_table, pmd_t *pmd,
 		spinlock_t *ptl, pte_t orig_pte)
@@ -1552,6 +1556,12 @@ static int do_wp_page(struct mm_struct *mm, struct vm_area_struct *vma,
 	int page_mkwrite = 0;
 	struct page *dirty_page = NULL;
 
+	/* 内核首先调用vm_normal_page，通过页表项找到页的struct page实例，
+	 * 本质上这个函数基于pte_pfn和pfn_to_page，这两者是所有体系结构都
+	 * 必须定义的。前者查找与页表项相关的页号，而后者确定与页号相关的
+	 * page实例。这是可行的，因为写时复制机制只对内存中实际存在的页
+	 * 调用（否则，首先需要通过缺页异常机制自动加载） 
+	 * */
 	old_page = vm_normal_page(vma, address, orig_pte);
 	if (!old_page)
 		goto gotten;
@@ -1623,12 +1633,17 @@ static int do_wp_page(struct mm_struct *mm, struct vm_area_struct *vma,
 gotten:
 	pte_unmap_unlock(page_table, ptl);
 
+	/* anon_vma_prepare准备好逆向映射机制的数据结构，
+	 * 以接受一个新的匿名区域 */
 	if (unlikely(anon_vma_prepare(vma)))
 		goto oom;
 	VM_BUG_ON(old_page == ZERO_PAGE(0));
+	/* 由于异常的来源是需要将一个充满有用数据的页复制到新页，
+	 * 因此内核调用alloc_page_vma分配一个新页 */
 	new_page = alloc_page_vma(GFP_HIGHUSER_MOVABLE, vma, address);
 	if (!new_page)
 		goto oom;
+	/* 将异常页的数据复制到新页，进程随后可以对新页进行写操作 */
 	cow_user_page(new_page, old_page, address, vma);
 
 	/*
@@ -1636,6 +1651,8 @@ gotten:
 	 */
 	page_table = pte_offset_map_lock(mm, pmd, address, &ptl);
 	if (likely(pte_same(*page_table, orig_pte))) {
+		/* 然后使用page_remove_rmap，删除到原来的只读页的逆向映射。
+		 * 新页添加到页表，此时也必须更新CPU的高速缓存 */
 		if (old_page) {
 			page_remove_rmap(old_page, vma);
 			if (!PageAnon(old_page)) {
@@ -1656,6 +1673,10 @@ gotten:
 		ptep_clear_flush(vma, address, page_table);
 		set_pte_at(mm, address, page_table, entry);
 		update_mmu_cache(vma, address, entry);
+		/* 使用lru_cache_add_active将新分配的页放置到LRU缓存的
+		 * 活动列表上，并通过page_add_anon_rmap将其插入到逆向
+		 * 映射数据结构。此后，用户空间进程可以向页写入数据
+		 * */
 		lru_cache_add_active(new_page);
 		page_add_new_anon_rmap(new_page, vma, address);
 
@@ -2149,6 +2170,14 @@ out_nomap:
  * but allow concurrent faults), and pte mapped but not yet locked.
  * We return with mmap_sem still held, but pte unmapped and unlocked.
  */
+/* 对于没有关联到文件作为后备存储器的页，需要调用do_anonymous_page进行映射。
+ * 除了无需向页读入数据之外，该过程几乎与映射基于文件的数据没什么不同。
+ * 在highmem内存域建立一个新页，并清空其内容。接下来将页加入到进程的页表，
+ * 并更新高速缓存或者MMU。请注意，较早版本的内核会区分对匿名映射的只读访问
+ * 和写访问。只读情况下，则使用一个填充字节0的全局页，来满足对匿名区域的读请求。
+ * 在内核版本2.6.24的开发期间，放弃了这种行为特性。因为经过测试，性能几乎没什么
+ * 提高，而在大型系统上共享/dev/zero映射可能会带来一些问题，我就不在这里详细讨论了
+ * */
 static int do_anonymous_page(struct mm_struct *mm, struct vm_area_struct *vma,
 		unsigned long address, pte_t *page_table, pmd_t *pmd,
 		int write_access)
@@ -2224,6 +2253,8 @@ static int __do_fault(struct mm_struct *mm, struct vm_area_struct *vma,
 	BUG_ON(vma->vm_flags & VM_PFNMAP);
 
 	if (likely(vma->vm_ops->fault)) {
+		/* 大多数文件都使用filemap_fault，该函数不仅读入所需数据，
+		 * 还实现了预读功能，即提前读入在未来很可能需要的页 */
 		ret = vma->vm_ops->fault(vma, &vmf);
 		if (unlikely(ret & (VM_FAULT_ERROR | VM_FAULT_NOPAGE)))
 			return ret;
@@ -2252,6 +2283,8 @@ static int __do_fault(struct mm_struct *mm, struct vm_area_struct *vma,
 	 */
 	page = vmf.page;
 	if (flags & FAULT_FLAG_WRITE) {
+		/* 如果需要写访问，内核必须区分共享和私有映射。
+		 * 对私有映射， 必须准备页的一份副本 */
 		if (!(vma->vm_flags & VM_SHARED)) {
 			anon = 1;
 			if (unlikely(anon_vma_prepare(vma))) {
@@ -2311,11 +2344,27 @@ static int __do_fault(struct mm_struct *mm, struct vm_area_struct *vma,
 	 */
 	/* Only go through if we didn't race with anybody else... */
 	if (likely(pte_same(*page_table, orig_pte))) {
+		/* 既然已经知道页的位置，则需要将其加入进程的页表，
+		 * 再合并到逆向映射数据结构中。在完成这些之前，需要
+		 * 用flush_icache_page更新缓存，确保页的内容在用户
+		 * 空间可见。大多数处理器都不需要这个步骤，一般定义
+		 * 为空操作
+		 * */
 		flush_icache_page(vma, page);
+		/* 指向只读页的页表项通常使用3.3.2节讨论的mk_pte函数
+		 * 产生。如果建立具有写权限的页，内核必须用pte_mkwrite
+		 * 显式设置写权限
+		 * */
 		entry = mk_pte(page, vma->vm_page_prot);
 		if (flags & FAULT_FLAG_WRITE)
 			entry = maybe_mkwrite(pte_mkdirty(entry), vma);
 		set_pte_at(mm, address, page_table, entry);
+		/* 页集成到逆向映射的具体方式，取决于其类型。如果在处理
+		 * 写访问权限时生成的页是匿名的，则使用lru_cache_add_active
+		 * 将其加入到LRU缓存的活动区域中，然后用
+		 * page_add_new_anon_rmap集成到逆向映射中。所有其他与基于文件
+		 * 的映射关联的页，则调用page_add_file_rmap
+		 * */
 		if (anon) {
                         inc_mm_counter(mm, anon_rss);
                         lru_cache_add_active(page);
@@ -2330,6 +2379,7 @@ static int __do_fault(struct mm_struct *mm, struct vm_area_struct *vma,
 		}
 
 		/* no need to invalidate: a not-present page won't be cached */
+		/* 最后，必须更新处理器的MMU缓存，因为页表已经修改 */
 		update_mmu_cache(vma, address, entry);
 	} else {
 		if (anon)
@@ -2447,6 +2497,12 @@ static int do_nonlinear_fault(struct mm_struct *mm, struct vm_area_struct *vma,
 		return VM_FAULT_OOM;
 	}
 
+	/* 异常地址与映射文件的内容并非线性相关，因此必须从先前用
+	 * pgoff_to_pte编码的页表项中，获取所需位置的信息。现在就
+	 * 需要获取并使用该信息：pte_to_pgoff分析页表项并获取所需
+	 * 的文件中的偏移量（以页为单位）
+	 * 在获得文件内部的地址之后，读取所需数据类似于普通的缺页异常
+	 * */
 	pgoff = pte_to_pgoff(orig_pte);
 	return __do_fault(mm, vma, address, pmd, pgoff, flags, orig_pte);
 }
@@ -2472,7 +2528,12 @@ static inline int handle_pte_fault(struct mm_struct *mm,
 	spinlock_t *ptl;
 
 	entry = *pte;
+	/* 页不在物理内存中 */
 	if (!pte_present(entry)) {
+		/* 如果没有对应的页表项（page_none），则内核必须从头
+		 * 开始加载该页，对匿名映射称之为按需分配（demand allocation）
+		 * ，对基于文件的映射，则称之为按需调页（demand paging）
+		 * */
 		if (pte_none(entry)) {
 			if (vma->vm_ops) {
 				if (vma->vm_ops->fault || vma->vm_ops->nopage)
@@ -2482,12 +2543,20 @@ static inline int handle_pte_fault(struct mm_struct *mm,
 					return do_no_pfn(mm, vma, address, pte,
 							 pmd, write_access);
 			}
+			/* 如果没有注册vm_operations_struct，调用以下返回一个匿名页 */
 			return do_anonymous_page(mm, vma, address,
 						 pte, pmd, write_access);
 		}
+		/* 非线性映射已经换出的部分不能像普通页那样换入，因为必须正确地恢复
+		 * 非线性关联。pte_file函数可以检查页表项是否属于非线性映射，
+		 * do_nonlinear_fault在这种情况下可用于处理异常
+		 * */
 		if (pte_file(entry))
 			return do_nonlinear_fault(mm, vma, address,
 					pte, pmd, write_access, entry);
+		/* 如果该页标记为不存在，而页表中保存了相关的信息，则意味着该页已经
+		 * 换出，因而必须从系统的某个交换区换入（换入或按需调页）  
+		 * */
 		return do_swap_page(mm, vma, address,
 					pte, pmd, write_access, entry);
 	}
@@ -2496,10 +2565,22 @@ static inline int handle_pte_fault(struct mm_struct *mm,
 	spin_lock(ptl);
 	if (unlikely(!pte_same(*pte, entry)))
 		goto unlock;
+	/* 如果该区域对页授予了写权限，而硬件的存取机制没有授予
+	 * （因此触发异常），则会发生另一种潜在的情况。请注意，
+	 * 此时对应的页已经在内存中，因而执行上述的第一个if语句
+	 * 之后，内核将直接跳到下述代码
+	 * do_wp_page负责创建该页的副本，并插入到进程的页表中
+	 * （在硬件层具备写权限）。该机制称为写时复制
+	 * （copy on write，简称COW），在第1章简短地讨论过。
+	 * 在进程发生分支时，页并不是立即复制的，而是映射到进程
+	 * 的地址空间中作为“只读”副本，以免在复制信息时花费太多
+	 * 时间。在实际发生写访问之前，都不会为进程创建页的独立副本
+	 * */
 	if (write_access) {
 		if (!pte_write(entry))
 			return do_wp_page(mm, vma, address,
 					pte, pmd, ptl, entry);
+		/* zzy：后面是什么场景 */
 		entry = pte_mkdirty(entry);
 	}
 	entry = pte_mkyoung(entry);

@@ -25,6 +25,11 @@ int fixup_exception(struct pt_regs *regs)
 	}
 #endif
 
+	/* egs->eip指向EIP寄存器，在IA-32处理器上包含了触发异常的代码段地址
+	 * search_exception_tables扫描异常表，查找适当的匹配项
+	 * 在找到修正例程时，将指令指针设置到对应的内存位置。在fixup_exception
+	 * 通过return返回后，内核将执行找到的例程
+	 * */
 	fixup = search_exception_tables(regs->eip);
 	if (fixup) {
 		regs->eip = fixup->fixup;

@@ -734,6 +734,17 @@ can_vma_merge_after(struct vm_area_struct *vma, unsigned long vm_flags,
  * Odd one out? Case 8, because it extends NNNN but needs flags of XXXX:
  * mprotect_fixup updates vm_flags & vm_page_prot on successful return.
  */
+/* 在新区域被加到进程的地址空间时， 内核会检查它是否可以与一个或多个现存区域合并。
+ * 实现：首先检查确定前一个区域的结束地址是否对应于新区域的起始地址。倘若如此，
+ * 内核接下来必须检查两个区域，确认二者的标志和映射的文件相同，文件映射内部的偏
+ * 移量符合连续区域的要求，两个区域内都不包含匿名映射，而且两个区域彼此兼容，如果
+ * 两个文件映射在地址空间中连续，但在文件中不连续，亦无法合并
+ * prev是是紧接着新区域之前的区域
+ * addr、 end和vm_flags分别是新区域的开始地址、 结束地址、 标志
+ * 如果该区域属于一个文件映射，则file是一个指向表示该文件的file实例的指针
+ * pgoff指定了映射在文件数据内的偏移量
+ * policy参数只在NUMA系统上需要
+ * */
 struct vm_area_struct *vma_merge(struct mm_struct *mm,
 			struct vm_area_struct *prev, unsigned long addr,
 			unsigned long end, unsigned long vm_flags,
@@ -888,6 +899,7 @@ void vm_stat_account(struct mm_struct *mm, unsigned long flags,
  * The caller must hold down_write(current->mm->mmap_sem).
  */
 
+/* 我们只考察具有代表性的标准情况：用MAP_SHARED映射普通文件 */
 unsigned long do_mmap_pgoff(struct file * file, unsigned long addr,
 			unsigned long len, unsigned long prot,
 			unsigned long flags, unsigned long pgoff)
@@ -935,6 +947,7 @@ unsigned long do_mmap_pgoff(struct file * file, unsigned long addr,
 	/* Obtain the address to map to. we verify (or select) it and ensure
 	 * that it represents a valid section of the address space.
 	 */
+	/* common case: arch_get_unmapped_area */
 	addr = get_unmapped_area(file, addr, len, pgoff, flags);
 	if (addr & ~PAGE_MASK)
 		return addr;
@@ -943,6 +956,13 @@ unsigned long do_mmap_pgoff(struct file * file, unsigned long addr,
 	 * to. we assume access permissions have been handled by the open
 	 * of the memory object, so we don't do any here.
 	 */
+	/* calc_vm_prot_bits和calc_vm_flag_bits将系统调用中指定的标志和访问
+	 * 权限常数合并到一个共同的标志集中，在后续的操作中比较易于处理
+	 * （MAP_和PROT_标志转换为前缀VM_的标志）
+	 * */
+	/* def_flags的值为0或VM_LOCKED。前者不会改变结果标志集，而VM_LOCK意味
+	 * 着随后映射的页无法换出，为设置def_flags的值，进程必须发出mlockall
+	 * 系统调用，使用上述机制防止所有未来的映射被换出 */
 	vm_flags = calc_vm_prot_bits(prot) | calc_vm_flag_bits(flags) |
 			mm->def_flags | VM_MAYREAD | VM_MAYWRITE | VM_MAYEXEC;
 
@@ -1080,6 +1100,10 @@ unsigned long mmap_region(struct file *file, unsigned long addr,
 	/* Clear old maps */
 	error = -ENOMEM;
 munmap_back:
+	/* find_vma_prepare函数，来查找前一个和后一个区域的vm_area_struct
+	 * 实例，以及红黑树中结点对应的数据。如果在指定的映射位置已经存在
+	 * 一个映射，则通过do_munmap删除它
+	 * */
 	vma = find_vma_prepare(mm, addr, &prev, &rb_link, &rb_parent);
 	if (vma && vma->vm_start < addr + len) {
 		if (do_munmap(mm, addr, len))
@@ -1091,6 +1115,17 @@ munmap_back:
 	if (!may_expand_vm(mm, len >> PAGE_SHIFT))
 		return -ENOMEM;
 
+	/* 如果没有设置MAP_NORESERVE标志或内核参数sysctl_overcommit_memory
+	 * 设置为OVERCOMMIT_NEVER（即，不允许过量使用），则调用vm_enough_memory。
+	 * 该函数选择是否分配操作所需的内存。如果它选择不分配，则系统调用结束，
+	 * 返回-ENOMEM
+	 * */
+	/* sysctl_overcommit_memory可以借助于/proc/sys/vm/overcommit_memory设置。
+	 * 当前有3个过量使用选项。 1允许应用程序分配与所要数量同样多的内存，
+	 * 即使超出系统地址空间所允许的限制。0意味着应用启发式过量使用，可用页的
+	 * 数目是通过计算页缓存、交换区和未使用页帧的总数而得到，且允许分配少量
+	 * 页的请求。2表示严格模式，称之为严格过量使用
+	 * */
 	if (accountable && (!(flags & MAP_NORESERVE) ||
 			    sysctl_overcommit_memory == OVERCOMMIT_NEVER)) {
 		if (vm_flags & VM_SHARED) {
@@ -1147,6 +1182,15 @@ munmap_back:
 		}
 		vma->vm_file = file;
 		get_file(file);
+		/* 大多数文件系统将generic_file_mmap用于该目的。
+		 * 它所作的所有工作，就是将映射的vm_ops成员设置
+		 * 为generic_file_vm_ops。其关键要素是filemap_fault，
+		 * 在应用程序访问映射区域但对应数据不在物理内存时调用。
+		 * filemap_fault借助于潜在文件系统的底层例程取得所需
+		 * 数据，并读取到物理内存，这些对应用程序是透明的。
+		 * 换句话说，映射数据不是在建立映射时立即读入内存，
+		 * 只有实际需要相应数据时才进行读取
+		 * */
 		error = file->f_op->mmap(file, vma);
 		if (error)
 			goto unmap_and_free_vma;
@@ -1194,6 +1238,13 @@ munmap_back:
 out:	
 	mm->total_vm += len >> PAGE_SHIFT;
 	vm_stat_account(mm, vm_flags, file, len >> PAGE_SHIFT);
+	/* 如果设置了VM_LOCKED，或者通过系统调用的标志参数显式传递进来，
+	 * 或者通过mlockall机制隐式设置，内核都会调用make_pages_present
+	 * 依次扫描映射中各页，对每一页触发缺页异常以便读入其数据。当然，
+	 * 这意味着失去了延迟读取带来的性能提高，但内核可以确保在映射建
+	 * 立后所涉及的页总是在物理内存中。毕竟VM_LOCKED标志用来防止从
+	 * 内存换出页，因此这些页必须先读进来
+	 * */
 	if (vm_flags & VM_LOCKED) {
 		mm->locked_vm += len >> PAGE_SHIFT;
 		make_pages_present(addr, addr + len);
@@ -1437,6 +1488,8 @@ struct vm_area_struct * find_vma(struct mm_struct * mm, unsigned long addr)
 		/* Check the cache first. */
 		/* (Cache hit rate is typically around 35%.) */
 		vma = mm->mmap_cache;
+		/* 上次处理的区域是否满足条件（addr处于区域中间），
+		 * 如果是直接返回，不然接着找，为什么条件不同呢 */
 		if (!(vma && vma->vm_end > addr && vma->vm_start <= addr)) {
 			struct rb_node * rb_node;
 
@@ -1847,6 +1900,11 @@ int do_munmap(struct mm_struct *mm, unsigned long start, size_t len)
 		return -EINVAL;
 
 	/* Find the first overlapping VMA */
+	/* 内核首先必须调用find_vma_prev，以找到解除映射区域的
+	 * vm_area_struct实例。该函数的操作方式与4.5.1节讨论的
+	 * find_vma完全相同，但它不仅会找到与地址匹配的vm_area_struct
+	 * 实例，还会返回指向前一个区域的指针
+	 * */
 	vma = find_vma_prev(mm, start, &prev);
 	if (!vma)
 		return 0;
@@ -1883,10 +1941,23 @@ int do_munmap(struct mm_struct *mm, unsigned long start, size_t len)
 	/*
 	 * Remove the vma's, and unmap the actual pages
 	 */
+	/* 内核接下来调用detach_vmas_to_be_unmapped，列出所有需要
+	 * 解除映射的区域。由于解除映射操作可能涉及地址空间中的任
+	 * 何区域，很可能影响连续几个区域。内核可能拆分这一系列区
+	 * 域中首尾两端的区域，以确保只影响到完整的区域。
+	 * detach_vmas_to_be_unmapped会遍历vm_area_struct实例的线性表，
+	 * 直至要解除映射的地址范围已经全部涵盖在内。该结构的vm_next
+	 * 成员在此处滥用，用于将解除映射的区域彼此连接起来。该函数还
+	 * 将mmap缓存设置为NULL，使之无效
+	 * */
 	detach_vmas_to_be_unmapped(mm, vma, prev, end);
+	/* 首先调用unmap_region从页表删除与映射相关的所有项。完成后，
+	 * 内核还必须确保将相关的项从TLB移除或使之无效
+	 * */
 	unmap_region(mm, vma, prev, start, end);
 
 	/* Fix up all other VM information */
+	/* 释放vm_area_struct实例占用的空间，完成从内核中删除映射的工作 */
 	remove_vma_list(mm, vma);
 
 	return 0;

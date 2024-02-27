@@ -1298,6 +1298,12 @@ static int fastcall page_cache_read(struct file * file, pgoff_t offset)
  * it in the page cache, and handles the special cases reasonably without
  * having a lot of duplicated code.
  */
+/* 给定涉及区域的vm_area_struct， 内核选择使用何种方法读取页？
+ * 1. 使用vm_area_struct->vm_file找到映射的file对象
+ * 2. 在file->f_mapping中找到指向映射自身的指针
+ * 3. 每个地址空间都有特定的地址空间操作，从中选择readpage方法。
+ * 使用mapping->a_ops->readpage(file, page)从文件中将数据传输到物理内存
+ * */
 int filemap_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
 {
 	int error;

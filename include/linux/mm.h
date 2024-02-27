@@ -76,12 +76,17 @@ extern unsigned int kobjsize(const void *objp);
 #define VM_EXEC		0x00000004
 #define VM_SHARED	0x00000008
 
+/* 用于确定是否可以设置上面四个标志，这个 mprotect 系统个调用需要的 */
 /* mprotect() hardcodes VM_MAYREAD >> 4 == VM_READ, and so for r/w/x bits. */
 #define VM_MAYREAD	0x00000010	/* limits for mprotect() etc */
 #define VM_MAYWRITE	0x00000020
 #define VM_MAYEXEC	0x00000040
 #define VM_MAYSHARE	0x00000080
 
+/* VM_GROWSDOWN和VM_GROWSUP表示一个区域是否可以向下或向上扩展
+ * （到更低或更高的虚拟地址），由于堆自下而上增长， 其区域需要
+ * 设置VM_GROWSUP。 VM_GROWSDOWN对栈设置，该区域自顶向下增长
+ * */
 #define VM_GROWSDOWN	0x00000100	/* general info on the segment */
 #define VM_GROWSUP	0x00000200
 #define VM_PFNMAP	0x00000400	/* Page-ranges managed without "struct page", just pure PFN */
@@ -90,15 +95,23 @@ extern unsigned int kobjsize(const void *objp);
 #define VM_EXECUTABLE	0x00001000
 #define VM_LOCKED	0x00002000
 #define VM_IO           0x00004000	/* Memory mapped I/O or similar */
+/* 如果区域很可能从头到尾顺序读取，则设置VM_SEQ_READ。
+ * VM_RAND_READ指定了读取可能是随机的。这两个标志用于
+ * “提示”内存管理子系统和块设备层，以优化其性能（例如，
+ * 如果访问是顺序的，则启用页的预读
+ * */
 
 					/* Used by sys_madvise() */
 #define VM_SEQ_READ	0x00008000	/* App will access data sequentially */
 #define VM_RAND_READ	0x00010000	/* App will not benefit from clustered reads */
 
+/* 如果设置了VM_DONTCOPY， 则相关的区域在fork系统调用执行时不复制 */
 #define VM_DONTCOPY	0x00020000      /* Do not copy this vma on fork */
 #define VM_DONTEXPAND	0x00040000	/* Cannot expand with mremap() */
 #define VM_RESERVED	0x00080000	/* Count as reserved_vm like IO */
+/* 指定区域是否被归入overcommit特性的计算中。这些特性以多种方式限制内存分配*/
 #define VM_ACCOUNT	0x00100000	/* Is a VM accounted object */
+/* 如果区域是基于某些体系结构支持的巨型页， 则设置VM_HUGETLB标志 */
 #define VM_HUGETLB	0x00400000	/* Huge TLB Page VM */
 #define VM_NONLINEAR	0x00800000	/* Is non-linear (remap_file_pages) */
 #define VM_MAPPED_COPY	0x01000000	/* T if mapped copy of data (nommu mmap) */
@@ -160,9 +173,19 @@ struct vm_fault {
  * to the functions called when a no-page or a wp-page exception occurs. 
  */
 struct vm_operations_struct {
+	/* 在创建和删除区域时，分别调用open和close。
+	 * 这两个接口通常不使用，设置为NULL
+	 * */
 	void (*open)(struct vm_area_struct * area);
 	void (*close)(struct vm_area_struct * area);
+	/* 如果地址空间中的某个虚拟内存页不在物理内存中，自动触发的缺页异常
+	 * 处理程序会调用该函数，将对应的数据读取到一个映射在用户地址空间的
+	 * 物理内存页中
+	 * */
 	int (*fault)(struct vm_area_struct *vma, struct vm_fault *vmf);
+	/* 是内核原来用于响应缺页异常的方法，不如fault那么灵活。
+	 * 出于兼容性的考虑，该成员仍然保留，但不应该用于新的代码
+	 * */
 	struct page *(*nopage)(struct vm_area_struct *area,
 			unsigned long address, int *type);
 	unsigned long (*nopfn)(struct vm_area_struct *area,
@@ -1072,6 +1095,9 @@ extern struct vm_area_struct * find_vma_prev(struct mm_struct * mm, unsigned lon
 
 /* Look up the first VMA which intersects the interval start_addr..end_addr-1,
    NULL if none.  Assume start_addr < end_addr. */
+/* 如果能找到，返回的是被包含或者相交
+ * 找不到，返回NULL
+ * */
 static inline struct vm_area_struct * find_vma_intersection(struct mm_struct * mm, unsigned long start_addr, unsigned long end_addr)
 {
 	struct vm_area_struct * vma = find_vma(mm,start_addr);

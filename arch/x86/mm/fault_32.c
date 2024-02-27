@@ -329,6 +329,17 @@ fastcall void __kprobes do_page_fault(struct pt_regs *regs,
 	 * protection error (error_code & 9) == 0.
 	 */
 	if (unlikely(address >= TASK_SIZE)) {
+		/* 如果地址超出用户地址空间的范围，则表明是vmalloc异常。
+		 * 因此该进程的页表必须与内核的主页表中的信息同步。实际上，
+		 * 只有访问发生在核心态， 而且该异常不是由保护错误触发时，
+		 * 才能允许这样做。换句话说，错误代码的比特位2、3、0都为0
+		 *
+		 * 内核使用辅助函数vmalloc_fault同步页表。我不会详细地给
+		 * 出其代码，因为该函数只是从init的页表（在IA-32系统上，
+		 * 这是内核的主页表）复制相关的项到当前页表。如果其中没有
+		 * 找到匹配项，则内核调用fixup_exception，作为试图从异常
+		 * 恢复的最后尝试
+		 * */
 		if (!(error_code & 0x0000000d) && vmalloc_fault(address) >= 0)
 			return;
 		if (notify_page_fault(regs))
@@ -354,6 +365,9 @@ fastcall void __kprobes do_page_fault(struct pt_regs *regs,
 	 * If we're in an interrupt, have no user context or are running in an
 	 * atomic region then we must not take the fault..
 	 */
+	/* 如果异常是在中断期间或内核线程中触发，也没有自身的上下文因而也没有
+	 * 独立的mm_struct实例，则内核会跳转到bad_area_nosemaphore标号
+	 * */
 	if (in_atomic() || !mm)
 		goto bad_area_nosemaphore;
 
@@ -380,10 +394,20 @@ fastcall void __kprobes do_page_fault(struct pt_regs *regs,
 	}
 
 	vma = find_vma(mm, address);
+	/* 没有找到结束地址在address之后的区域，在这种情况下访问是无效的 */
 	if (!vma)
 		goto bad_area;
+	/* 异常地址在找到的区域内，在这种情况下访问是有效的，
+	 * 缺页异常由内核负责恢复 */
 	if (vma->vm_start <= address)
 		goto good_area;
+	/* 找到一个结束地址在异常地址之后的区域，但异常地址不在该区域内。
+	 * 这可能有下面两种原因：
+	 * 1. 该区域的VM_GROWSDOWN标志置位。这意味着区域是栈，自顶向下增长。
+	 * 接下来调用expand_stack适当地增大栈。如果成功，则结果返回0，
+	 * 内核在good_area标号恢复执行。否则，认为访问无效 
+	 * 2. 找到的区域不是栈，访问无效
+	 * */
 	if (!(vma->vm_flags & VM_GROWSDOWN))
 		goto bad_area;
 	if (error_code & 4) {
@@ -406,6 +430,7 @@ good_area:
 	si_code = SEGV_ACCERR;
 	write = 0;
 	switch (error_code & 3) {
+		/* 这应该就是为写时复制准备的东西把 */
 		default:	/* 3: write, present */
 				/* fall through */
 		case 2:		/* write, not present */
@@ -426,17 +451,30 @@ good_area:
 	 * make sure we exit gracefully rather than endlessly redo
 	 * the fault.
 	 */
+	/* handle_mm_fault是一个体系结构无关的例程，用于选择适当的
+	 * 异常恢复方法（按需调页、换入，等等），并应用选择的方法
+	 * 创建页面也可能发生异常：
+	 * */
 	fault = handle_mm_fault(mm, vma, address, write);
 	if (unlikely(fault & VM_FAULT_ERROR)) {
+		/* 如果用于加载页的物理内存不足，内核会强制终止该进程，
+		 * 在最低限度上维持系统的运行
+		 * */
 		if (fault & VM_FAULT_OOM)
 			goto out_of_memory;
+		/* 如果对数据的访问已经允许，但由于其他的原因失败
+		 * （例如，访问的映射已经在访问的同时被另一个进程收缩，
+		 * 不再存在于给定的地址），则将SIGBUS信号发送给进程
+		 * */
 		else if (fault & VM_FAULT_SIGBUS)
 			goto do_sigbus;
 		BUG();
 	}
 	if (fault & VM_FAULT_MAJOR)
+		/* 例程返回VM_FAULT_MINOR（数据已经在内存中）*/
 		tsk->maj_flt++;
 	else
+		/* 例程返回VM_FAULT_MAJOR（数据需要从块设备读取）*/
 		tsk->min_flt++;
 
 	/*
@@ -459,6 +497,7 @@ bad_area:
 
 bad_area_nosemaphore:
 	/* User mode accesses just cause a SIGSEGV */
+	/* 如果异常源自用户空间（error_code的比特位2置位），则返回段错误 */
 	if (error_code & 4) {
 		/*
 		 * It's possible to have interrupts off here.
@@ -506,9 +545,30 @@ bad_area_nosemaphore:
 
 no_context:
 	/* Are we prepared to handle this kernel fault?  */
+	/* 如果异常源自内核空间，则调用fixup_exception */
+	/* 在向或从用户空间复制数据时，如果访问的地址在虚拟地址空间
+	 * 中不与物理内存页关联，则会发生缺页异常。对用户状态发生的
+	 * 该情况，我们已经熟悉。在应用程序访问一个虚拟地址时，内核
+	 * 将使用上文讨论的按需调页机制，自动并透明地返回一个物理内
+	 * 存页。如果访问发生在核心态，异常同样必须校正，但使用的方
+	 * 法稍有不同
+	 * 在处理不是由于访问vmalloc区域导致的缺页异常时，异常修正
+	 * （exception fixup）机制是一个最后手段。在某些时候，内核
+	 * 有很好的理由准备截取不正确的访问。例如，从用户空间地址复制
+	 * 作为系统调用参数的地址数据时。
+	 * 每次发生缺页异常时，将输出异常的原因和当前执行代码的地址。
+	 * 这使得内核可以编译一个列表，列出所有可能执行未授权内存访问
+	 * 操作的危险代码块。这个“异常表”在链接内核映像时创建，在二进
+	 * 制文件中位于__start_exception_table和__end_exception_table之间。
+	 * 每个表项都对应于一个struct exception_table_entry实例
+	 * */
 	if (fixup_exception(regs))
 		return;
 
+	/* 如果没有修正例程，会怎么样？这表明出现了一个真正的内核异常，
+	 * 在对search_exception_table（不成功的）调用之后，将调用
+	 * do_page_fault来处理该异常，最终导致内核进入oops状态
+	 * */
 	/* 
 	 * Valid to do another page fault here, because if this fault
 	 * had been triggered by is_prefetch fixup_exception would have 
@@ -537,6 +597,10 @@ no_context:
 					"(uid: %d)\n", current->uid);
 		}
 #endif
+		/* 如果访问的是0和PAGE_SIZE - 1之间的虚拟地址，则内核报告试图反
+		 * 引用无效的NULL指针。否则，用户被通知内核内存中有一个调页请求
+		 * 无法满足，这两种情况都是内核的程序错误
+		 * */
 		if (address < PAGE_SIZE)
 			printk(KERN_ALERT "BUG: unable to handle kernel NULL "
 					"pointer dereference");
@@ -583,8 +647,14 @@ no_context:
 	tsk->thread.cr2 = address;
 	tsk->thread.trap_no = 14;
 	tsk->thread.error_code = error_code;
+	/* 还会输出一些附加信息以帮助调试异常，并提供特定于硬件的数据。
+	 * die输出当前各寄存器的内容（这只是die输出的一部分）
+	 * */
 	die("Oops", regs, error_code);
 	bust_spinlocks(0);
+	/* 此后，强制用SIGKILL结束当前进程，做一些最后的抢救工作
+	 * （在很多情况下，此类异常将导致系统不可用）
+	 * */
 	do_exit(SIGKILL);
 
 /*

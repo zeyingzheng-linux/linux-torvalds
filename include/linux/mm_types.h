@@ -153,6 +153,7 @@ struct vm_area_struct {
 	struct vm_area_struct *vm_next;
 
 	pgprot_t vm_page_prot;		/* Access permissions of this VMA. */
+	/* see include/linux/mm.h  */
 	unsigned long vm_flags;		/* Flags, listed below. */
 
 	struct rb_node vm_rb;
@@ -163,6 +164,15 @@ struct vm_area_struct {
 	 * linkage to the list of like vmas hanging off its node, or
 	 * linkage of vma in the address_space->i_mmap_nonlinear list.
 	 */
+	/* 从文件到进程的虚拟地址空间中的映射，可通过文件中的区间和内存
+	 * 中对应的区间唯一地确定。为跟踪与进程关联的所有区间，内核使用
+	 * 了如上所述的链表和红黑树。但还必须能够反向查询：给出文件中的
+	 * 一个区间， 内核有时需要知道该区间映射到的所有进程。这种映射称
+	 * 作共享映射（shared mapping），至于这种映射的必要性，看看系统
+	 * 中几乎每个进程都使用的C标准库，读者就知道了。为提供所需的信息，
+	 * 所有的vm_area_struct实例都还通过一个优先树管理，包含在shared
+	 * 成员中。
+	 * */
 	union {
 		struct {
 			struct list_head list;
@@ -179,6 +189,13 @@ struct vm_area_struct {
 	 * can only be in the i_mmap tree.  An anonymous MAP_PRIVATE, stack
 	 * or brk vma (with NULL file) can only be in an anon_vma list.
 	 */
+	/* anon_vma_node和anon_vma用于管理源自匿名映射（anonymous mapping）的共
+	 * 享页。指向相同页的映射都保存在一个双链表上，anon_vma_node充当链表元素
+	 * 有若干此类链表，具体的数目取决于共享物理内存页的映射集合的数目。
+	 *
+	 * anon_vma成员是一个指向与各链表关联的管理结构的指针，该管理结构由一个
+	 * 表头和相关的锁组成
+	 * */
 	struct list_head anon_vma_node;	/* Serialized by anon_vma->lock */
 	struct anon_vma *anon_vma;	/* Serialized by page_table_lock */
 
@@ -186,6 +203,9 @@ struct vm_area_struct {
 	struct vm_operations_struct * vm_ops;
 
 	/* Information about our backing store: */
+	/* 指定了文件映射的偏移量，该值用于只映射了文件部分内容时
+	 * （如果映射了整个文件，则偏移量为0）
+	 * */
 	unsigned long vm_pgoff;		/* Offset (within vm_file) in PAGE_SIZE
 					   units, *not* PAGE_CACHE_SIZE */
 	struct file * vm_file;		/* File we map to (can be NULL). */
@@ -201,7 +221,9 @@ struct vm_area_struct {
 };
 
 struct mm_struct {
+	/* VMA是个单链表 */
 	struct vm_area_struct * mmap;		/* list of VMAs */
+	/* VMA是个红黑树 */
 	struct rb_root mm_rb;
 	struct vm_area_struct * mmap_cache;	/* last find_vma result */
 	unsigned long (*get_unmapped_area) (struct file *filp,
