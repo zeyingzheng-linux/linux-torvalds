@@ -42,11 +42,23 @@ struct cpu_workqueue_struct {
 
 	spinlock_t lock;
 
+	/* worker thread要处理work，这些work被挂入work queue中的链表结构。
+	 * 由于每个processor都需要处理自己的work，因此这个work list是per
+	 * cpu的。worklist成员就是这个per cpu的链表头，当worker thread被
+	 * 调度到的时候，就从这个队列中一个个的摘下work来处理
+	 * */
 	struct list_head worklist;
+	/* work的等待队列头 */
 	wait_queue_head_t more_work;
+	/* 当前正在处理的work */
 	struct work_struct *current_work;
 
+	/* 所有cpu共享一个类型的workqueue，最常用的workqueue就是缺省的
+	 * 那个 keventd_wq，一个workqueue对应一组work thread（不考虑
+	 * singlethread场景先），每个cpu一个thread，由cpu_workqueue_struct
+	 * 抽象。 */
 	struct workqueue_struct *wq;
+	/* work thread task */
 	struct task_struct *thread;
 
 	int run_depth;		/* Detect run_workqueue() recursion depth */
@@ -57,10 +69,15 @@ struct cpu_workqueue_struct {
  * per-CPU workqueues:
  */
 struct workqueue_struct {
+	/* per-cpu work queue struct */
 	struct cpu_workqueue_struct *cpu_wq;
+	/* workqueue list，系统中所有的workqueue会挂入一个
+	 * 全局链表， workqueues */
 	struct list_head list;
 	const char *name;
+	/* single(not per-cpu) or multi thread */
 	int singlethread;
+	/* default nofrezable */
 	int freezeable;		/* Freeze threads during suspend */
 #ifdef CONFIG_LOCKDEP
 	struct lockdep_map lockdep_map;
@@ -301,13 +318,20 @@ static int worker_thread(void *__cwq)
 	struct cpu_workqueue_struct *cwq = __cwq;
 	DEFINE_WAIT(wait);
 
+	/* 默认是NoFreezeable的，如果用户创建的是Freezeable的，那么
+	 * 需要清除一下 task flag的 PF_NOFREEZE标记 */
 	if (cwq->wq->freezeable)
 		set_freezable();
 
+	/* 看来比普通进程的优先级还是要高一点 */
 	set_user_nice(current, -5);
 
 	for (;;) {
 		prepare_to_wait(&cwq->more_work, &wait, TASK_INTERRUPTIBLE);
+		/* 1. PM没有请求冻结该 worker thread
+		 * 2. 该thread没有被其他模块停掉
+		 * 3. worklist 位空
+		 * */
 		if (!freezing(current) &&
 		    !kthread_should_stop() &&
 		    list_empty(&cwq->worklist))

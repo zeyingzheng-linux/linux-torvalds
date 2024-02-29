@@ -22,6 +22,17 @@ typedef void (*work_func_t)(struct work_struct *work);
  */
 #define work_data_bits(work) ((unsigned long *)(&(work)->data))
 
+/* 从底层驱动的角度来看，我们只关心如何处理deferable task
+ * （由work_struct抽象）。驱动程序定义了work_struct，其func
+ * 成员就是deferred work，然后挂入work list就OK了（当然要唤
+ * 醒worker thread了），系统的调度器调度到worker thread的时
+ * 候，该work自然会被处理了。当然，挂入哪一个workqueue的那
+ * 一个worker thread呢？如何选择workqueue是driver自己的事情，
+ * 可以使用系统缺省的workqueue，简单，实用。当然也可以自己创
+ * 建一个workqueue，并把work挂入其中。选择哪一个worker thread
+ * 比较简单：work在哪一个cpu上被调度，那么就挂入哪一个worker
+ * thread
+ * */
 struct work_struct {
 	atomic_long_t data;
 #define WORK_STRUCT_PENDING 0		/* T if work item pending execution */
