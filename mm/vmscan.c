@@ -47,26 +47,53 @@
 
 struct scan_control {
 	/* Incremented by the number of inactive pages that were scanned */
+	/* 向调用者报告已经扫描到的不活动页的数目， 用于在页面回收涉及的
+	 * 各个内核函数之间进行通信 */
 	unsigned long nr_scanned;
 
 	/* This context's GFP mask */
+	/* 指定了在调用页面回收函数的上下文环境下有效的页面分配标志。 这
+	 * 很重要， 因为有时候在页面回收期间必须分配新的内存。 如果发起页
+	 * 面回收的上下文环境不允许睡眠， 该约束当然必须转给所有调用的函数
+	 * */
 	gfp_t gfp_mask;
 
+	/* 指定了内核是否允许将页写出到后备存储器，指定了内核是否允许将
+	 * 页写出到后备存储器 */
 	int may_writepage;
 
 	/* Can pages be swapped as part of reclaim? */
+	/*
+	 * 确定了页面回收处理过程中是否允许页交换。 只有在两种情况下会禁
+	 * 用页交换： 软件挂起（software suspend）机制在执行页面回收，
+	 * 或NUMA内存域显式禁用了页交换 */
 	int may_swap;
 
 	/* This context's SWAP_CLUSTER_MAX. If freeing memory for
 	 * suspend, we effectively ignore SWAP_CLUSTER_MAX.
 	 * In this context, it doesn't matter that we scan the
 	 * whole list at once. */
+	/* 实际上与页交换无关， 它是一个阈值， 表示一次页面回收步骤中，
+	 * 在各CPU列表中扫描的内存页数目的最小值。 通常设置为
+	 * SWAP_CLUSTER_MAX， 该宏默认定义为32
+	 * */
 	int swap_cluster_max;
 
+	/* 控制内核换出页的积极程度， 该值的范围在0到100之间。
+	 * 默认情况下， 将使用vm_swappiness。 后者的标准设置为
+	 * 60， 但可以通过/proc/sys/vm/swappiness调整
+	 * */
 	int swappiness;
 
+	/* 用于报告一种令人遗憾的情况， 即所有内存域中的内存当
+	 * 前都是完全不可回收的。 例如， 在所有页都被mlock系统
+	 * 调用钉住时， 就可能发生这种情况
+	 * */
 	int all_unreclaimable;
 
+	/* 内核可以主动按给定的分配阶来尝试回收一组内存页。
+	 * order表示分配阶， 即要回收2order个连续页
+	 * */
 	int order;
 };
 
@@ -219,18 +246,24 @@ static inline int page_mapping_inuse(struct page *page)
 	struct address_space *mapping;
 
 	/* Page is in somebody's page tables. */
+	/* 该页被映射到一个页表中，或在用户态虚拟地址空间中使用 */
 	if (page_mapped(page))
 		return 1;
 
 	/* Be more reluctant to reclaim swapcache than pagecache */
+	/* 该页包含在交换缓存中 */
 	if (PageSwapCache(page))
 		return 1;
 
+	/* 该页包含在匿名映射中 */
 	mapping = page_mapping(page);
 	if (!mapping)
 		return 0;
 
 	/* File is mmap'd by somebody? */
+	/* 该页通过文件映射映射到用户层。这种情况并不借助于页表检查，
+	 * 而是通过mapping->i_mmap和mapping_i_map_nonlinear， 其中
+	 * 包含了普通和非线性映射的映射信息 */
 	return mapping_mapped(mapping);
 }
 
@@ -379,6 +412,12 @@ static pageout_t pageout(struct page *page, struct address_space *mapping,
  * successfully detached, return 1.  Assumes the caller has a single ref on
  * this page.
  */
+/* 如果页保存在交换缓存中， 那么现在可以确定， 其数据既在交换区中， 又在交换缓存
+ * 中。 由于该页已经换出， 交换缓存已经完成其职责， 可以用__delete_from_swap_cache
+ * 将该页从交换缓存删除。 内核还使用swap_free， 将交换区中对应槽位的使用计数器减1。
+ * 这是必须的， 因为对相应槽位的引用减少了一个， 需要反映出来
+ * 如果页不在交换缓存中， 则使用__remove_from_page_cache将其从一般的页缓存删除
+ * */
 int remove_mapping(struct address_space *mapping, struct page *page)
 {
 	BUG_ON(!PageLocked(page));
@@ -438,6 +477,11 @@ cannot_free:
 /*
  * shrink_page_list() returns the number of reclaimed pages
  */
+/* shrink_page_list从参数取得一组选中回收的页（一个链表） ，
+ * 试图将各页写回到对应的后备存储器。 这是策略算法执行的最后
+ * 一个步骤， 所有其他的一切都是页交换的机制部分的职责。
+ * shrink_page_list函数形成了内核的两个子系统之间的接口
+ * */
 static unsigned long shrink_page_list(struct list_head *page_list,
 					struct scan_control *sc,
 					enum pageout_io sync_writeback)
@@ -461,6 +505,9 @@ static unsigned long shrink_page_list(struct list_head *page_list,
 		page = lru_to_page(page_list);
 		list_del(&page->lru);
 
+		/* 该页由内核的其他部分锁定。如果是这样，该页不会回收
+		 * 否则，当前代码路径会锁定该页，并进行回收
+		 * */
 		if (TestSetPageLocked(page))
 			goto keep;
 
@@ -478,6 +525,12 @@ static unsigned long shrink_page_list(struct list_head *page_list,
 		may_enter_fs = (sc->gfp_mask & __GFP_FS) ||
 			(PageSwapCache(page) && (sc->gfp_mask & __GFP_IO));
 
+		/* shrink_inactive_list可能调用shrink_page_list两次： 首先是
+		 * 异步回写模式， 然后是同步回写模式。 因而， 可能发生这样的
+		 * 情况， 所述页当前可能正处于回写过程中， 由页标志PG_writeback
+		 * 表示。 如果回写操作当前在请求同步回写， 那么将使用
+		 * wait_on_page_writeback等待该页上所有待决I/O操作完成 
+		 * */
 		if (PageWriteback(page)) {
 			/*
 			 * Synchronous reclaim is performed in two passes,
@@ -495,6 +548,7 @@ static unsigned long shrink_page_list(struct list_head *page_list,
 
 		referenced = page_referenced(page, 1);
 		/* In active use or really unfreeable?  Activate it. */
+		/* 并不意味着该页根本不能回收，只要来自高阶分配的压力足够大 */
 		if (sc->order <= PAGE_ALLOC_COSTLY_ORDER &&
 					referenced && page_mapping_inuse(page))
 			goto activate_locked;
@@ -504,6 +558,13 @@ static unsigned long shrink_page_list(struct list_head *page_list,
 		 * Anonymous process memory has backing store?
 		 * Try to allocate it some swap space here.
 		 */
+		/* 如果shrink_page_list当前考虑的页没有关联到后备存储器， 那么该页
+		 * 是由一个进程匿名创建的。 在必须回收此类内存页时， 其数据将写入到
+		 * 交换区。 在遇到此类型内存页， 但尚未分配交换区槽位时， 将调用
+		 * add_to_swap分配一个槽位， 并将该页添加到交换缓存。 同时， 将相关
+		 * 的page实例加入到swapper_space使得该页能够像其他已经建立映射的页
+		 * 一样处理
+		 * */
 		if (PageAnon(page) && !PageSwapCache(page))
 			if (!add_to_swap(page, GFP_ATOMIC))
 				goto activate_locked;
@@ -516,6 +577,17 @@ static unsigned long shrink_page_list(struct list_head *page_list,
 		 * processes. Try to unmap it here.
 		 */
 		if (page_mapped(page) && mapping) {
+			/* 如果该页已经被映射到一个或多个的进程的页表中
+			 * （依旧使用page_mapped检查） ， 指向该页的页表项必须从所
+			 * 有引用该页的进程的页表移除。 为此rmap子系统提供了
+			 * try_to_unmap函数； 该函数将所述页从所有使用它的进程解除
+			 * 映射（这里不详细讲述该函数了， 因为其实现不是特别有趣）。
+			 * 此外， 特定于体系结构的页表项将替换为一个引用， 表示页数
+			 * 据目前所在的位置。 这是通过try_to_unmap_one完成的。必要
+			 * 的信息可以从页的地址空间结构获得， 其中包含了所有后备
+			 * 存储器相关数据
+			 * 重要的是， 新页表项中不要设置如下标志位
+			 * */
 			switch (try_to_unmap(page, 0)) {
 			case SWAP_FAIL:
 				goto activate_locked;
@@ -526,6 +598,9 @@ static unsigned long shrink_page_list(struct list_head *page_list,
 			}
 		}
 
+		/* PageDirty检查该页是否为脏，如果为脏则必须与底层存储介质同步。
+		 * 这也包含了交换地址空间中的页。 如果页是脏的， 则需要几个操作
+		 * */
 		if (PageDirty(page)) {
 			if (sc->order <= PAGE_ALLOC_COSTLY_ORDER && referenced)
 				goto keep_locked;
@@ -535,12 +610,33 @@ static unsigned long shrink_page_list(struct list_head *page_list,
 				goto keep_locked;
 
 			/* Page is dirty, try to write it out here */
+			/* 内核通过调用writepage地址空间例程确保数据写回（该例程由
+			 * pageout辅助函数调用， 该辅助函数提供了writepage所需的所
+			 * 有参数） 。 如果数据是映射自文件系统中的某个文件， 则使
+			 * 用特定于文件系统的例程来处理到文件的同步， 而交换页则使
+			 * 用swap_writepage写入到所分配的交换槽位
+			 * */
 			switch (pageout(page, mapping, sync_writeback)) {
+			/* 如果在回写期间发生错误， 结果可能是PAGE_KEEP或
+			 * PAGE_KEEP_ACTIVATE。 二者都会使shrink_page_list函数将该
+			 * 页保留在前述的返回链表上， 但PAGE_KEEP_ACTIVATE还会设
+			 * 置页状态PG_active（这是可能发生的， 例如page所属的地址
+			 * 空间没有提供writeback方法， 这使得页的同步变得无用）
+			 * */
 			case PAGE_KEEP:
 				goto keep_locked;
 			case PAGE_ACTIVATE:
 				goto activate_locked;
 			case PAGE_SUCCESS:
+				/* 如果写请求成功发送到块层， 那么返回PAGE_SUCCESS。
+				 * 在异步回写模式中， 在pageout返回时， 该页通常仍然
+				 * 处于回写过程中， 跳转到标号keep只是将该页添加到
+				 * shrink_page_list函数局部的链表ret_pages上，
+				 * ret_pages中的页在shrink_page_list结束时合并到
+				 * page_list链表， 而后又返回到LRU链表。 在写操作执行
+				 * 之后， 页的内容已经与后备存储器同步， 下一次调用
+				 * shrink_page_list，该页将不再是脏的， 因而可以换出
+				 * */
 				if (PageWriteback(page) || PageDirty(page))
 					goto keep;
 				/*
@@ -553,6 +649,7 @@ static unsigned long shrink_page_list(struct list_head *page_list,
 					goto keep_locked;
 				mapping = page_mapping(page);
 			case PAGE_CLEAN:
+				/* 这表示数据已经与后备存储器同步， 内存可以回收 */
 				; /* try to free the page below */
 			}
 		}
@@ -578,6 +675,11 @@ static unsigned long shrink_page_list(struct list_head *page_list,
 		 * process address space (page_count == 1) it can be freed.
 		 * Otherwise, leave the page on the LRU so it is swappable.
 		 */
+		/* 如果页有私有数据因而有与之关联的缓冲区（对包含了文件系统元数据
+		 * 的页来说， 通常是这样） ， 那么将调用try_to_release。 该函数试
+		 * 图使用地址空间结构中releasepage操作释放该页， 如果该页没有所属
+		 * 的映射， 则使用try_to_free_buffers释放数据
+		 * */
 		if (PagePrivate(page)) {
 			if (!try_to_release_page(page, sc->gfp_mask))
 				goto activate_locked;
@@ -585,12 +687,21 @@ static unsigned long shrink_page_list(struct list_head *page_list,
 				goto free_it;
 		}
 
+		/* 内核接下来将页与其地址空间分离。 为此提供了辅助函数
+		 * remove_mapping*/
 		if (!mapping || !remove_mapping(mapping, page))
 			goto keep_locked;
 
 free_it:
 		unlock_page(page);
 		nr_reclaimed++;
+		/* 现在， 可以确保所处理的页已经不在内核的数据结构中了。
+		 * 但是， 主要问题尚未解决， 该页占用的物理内存尚未释放。
+		 * 内核使用页向量来批量释放相关的物理内存。 ， 使用
+		 * pagevec_add将需要释放的页插入到函数局部的freed_pvec页
+		 * 向量中。 在页向量变满时， 使用__pagevec_release_nonlru
+		 * 集中释放其全部成员
+		 * */
 		if (!pagevec_add(&freed_pvec, page))
 			__pagevec_release_nonlru(&freed_pvec);
 		continue;
@@ -607,6 +718,10 @@ keep:
 	list_splice(&ret_pages, page_list);
 	if (pagevec_count(&freed_pvec))
 		__pagevec_release_nonlru(&freed_pvec);
+	/* 最后，
+	 * 1. 需要更新内核的页交换统计信息
+	 * 2. 需要返回所释放页的数目
+	 * */
 	count_vm_events(PGACTIVATE, pgactivate);
 	return nr_reclaimed;
 }
@@ -709,6 +824,8 @@ static unsigned long isolate_lru_pages(unsigned long nr_to_scan,
 			BUG();
 		}
 
+		/* 如果order没有给出想要的分配阶，那么每次循环在从
+		 * LRU链表隔离出一页之后，都继续跳转到下一次循环 */
 		if (!order)
 			continue;
 
@@ -721,6 +838,11 @@ static unsigned long isolate_lru_pages(unsigned long nr_to_scan,
 		 * where that page is in a different zone we will detect
 		 * it from its zone id and abort this block scan.
 		 */
+		/* 由于伙伴系统希望将较高的分配阶按阶对齐，内核将计算当前
+		 * 标记页对应页帧所落入的页帧区间。考虑例子的情形，即标记
+		 * 页的页帧编号为6。对二阶分配来说，按分配阶对齐的页帧区
+		 * 间是[0, 3]、[4, 7]、[8, 11]等。因而内核需要扫描页帧4到7
+		 * */
 		zone_id = page_zone_id(page);
 		page_pfn = page_to_pfn(page);
 		pfn = page_pfn & ~((1 << order) - 1);
@@ -729,6 +851,7 @@ static unsigned long isolate_lru_pages(unsigned long nr_to_scan,
 			struct page *cursor_page;
 
 			/* The target page is in the block, ignore it. */
+			/* 必须忽略目标页（即标记页），它已经包含在所选择的页中 */
 			if (unlikely(pfn == page_pfn))
 				continue;
 
@@ -738,6 +861,10 @@ static unsigned long isolate_lru_pages(unsigned long nr_to_scan,
 
 			cursor_page = pfn_to_page(pfn);
 			/* Check that we have not crossed a zone boundary. */
+			/* 如果计算出的页帧区间跨越了内存域边界，必须放弃处理，
+			 * 因为混合分配（例如，混合分配DMA内存和普通内存）是
+			 * 不允许的
+			 * */
 			if (unlikely(page_zone_id(cursor_page) != zone_id))
 				continue;
 			switch (__isolate_lru_page(cursor_page, mode)) {
@@ -792,6 +919,7 @@ static unsigned long shrink_inactive_list(unsigned long max_scan,
 
 	pagevec_init(&pvec, 1);
 
+	/* 将LRU缓存当前的内容分配到各个内存域的活动链表或惰性链表 */
 	lru_add_drain();
 	spin_lock_irq(&zone->lru_lock);
 	do {
@@ -801,11 +929,27 @@ static unsigned long shrink_inactive_list(unsigned long max_scan,
 		unsigned long nr_freed;
 		unsigned long nr_active;
 
+		/* 如果使用了集中回收， isolate_lru_pages也会选取与链表上的
+		 * 页相邻的页帧。 如果导致进行当前页回收操作的请求， 其分配
+		 * 阶比PAGE_ALLOC_COSTLY_ORDER指定的阈值要大， 那么内核将允
+		 * 许集中回收同时使用标记页相邻的活动和不活动页。 对较小的
+		 * 分配阶， 可能只使用不活动页。 这种做法背后的原因是这样
+		 * ： 如果内核仅限于不活动页， 较大型的分配通常无法满足，
+		 * 对繁忙的内核来说， 较大的连续物理内存区间中包含活动页的
+		 * 可能性是非常高的。 PAGE_ALLOC_COSTLY_ORDER默认设置为3，
+		 * 这意味着内核认为分配8个（或以上） 连续页是复杂的操作
+		 * */
 		nr_taken = isolate_lru_pages(sc->swap_cluster_max,
 			     &zone->inactive_list,
 			     &page_list, &nr_scan, sc->order,
 			     (sc->order > PAGE_ALLOC_COSTLY_ORDER)?
 					     ISOLATE_BOTH : ISOLATE_INACTIVE);
+		/* 尽管惰性链表上所有页都可以保证是不活动的， 集中回收可能导致
+		 * 活动页出现在isolate_lru_pages的结果链表上。 为正确处理这些页
+		 * ， 辅助函数clear_active_flags遍历所有页， 统计活动页， 并从
+		 * 活动页清除页标志PG_active。 最后， 将结果链表传递给
+		 * shrink_page_list， 以便写出。 请注意， 这里采用了异步模式
+		 * */
 		nr_active = clear_active_flags(&page_list);
 		__count_vm_events(PGDEACTIVATE, nr_active);
 
@@ -816,6 +960,11 @@ static unsigned long shrink_inactive_list(unsigned long max_scan,
 		spin_unlock_irq(&zone->lru_lock);
 
 		nr_scanned += nr_scan;
+		/* 注意， 我们并不确定所有被选中回收的页都是实际可回收的。
+		 * shrink_page_list将不可回收的页留在传递过来的链表上，
+		 * 成功写出的页数目返回。 该数值必须加到换出页的总数上，
+		 * 以确定工作在何时结束
+		 * */
 		nr_freed = shrink_page_list(&page_list, sc, PAGEOUT_IO_ASYNC);
 
 		/*
@@ -824,6 +973,16 @@ static unsigned long shrink_inactive_list(unsigned long max_scan,
 		 * for IO to complete. This will stall high-order allocations
 		 * but that should be acceptable to the caller
 		 */
+		/* 如果并非所有进行回收的页都被回收， 即nr_freed < nr_taken，
+		 * 那么链表中的某些页可能被锁定， 无法在异步模式下写出。如果
+		 * 内核在直接回收模式下执行当前的回收操作， 即回收并非由交换
+		 * 守护进程kswapd调用， 回收的目的是为了满足一个高阶分配，
+		 * 那么回收操作首先得等待块设备上的拥塞解除。 然后， 以同步
+		 * 模式再执行一遍写出。 这种做法的缺点在于， 高阶分配会有一
+		 * 点延迟， 但高阶分配不会频繁发生， 因而这不是问题。 分配阶
+		 * 小于PAGE_ALLOC_COSTLY_ORDER的分配会频繁发生， 但这些不会
+		 * 受到干扰
+		 * */
 		if (nr_freed < nr_taken && !current_is_kswapd() &&
 					sc->order > PAGE_ALLOC_COSTLY_ORDER) {
 			congestion_wait(WRITE, HZ/10);
@@ -855,6 +1014,16 @@ static unsigned long shrink_inactive_list(unsigned long max_scan,
 		/*
 		 * Put back any unfreeable pages.
 		 */
+		/* 最后， 不可回收的页必须返回到LRU链表。 集中回收和失败
+		 * 的写出操作可能导致活动页出现在局部链表上，因而活动链
+		 * 表和惰性链表都是可能的目的地。 为保持LRU的顺序， 内核
+		 * 将从尾部到头部遍历局部链表。 根据页是否活动， 分别使
+		 * 用add_page_to_active_list或add_page_to_inactive_list
+		 * 返回到对应的LRU链表的头部。 同样， 各页的使用计数器必
+		 * 须减1， 因为在回收处理开始时， 使用计数器都进行了加1。
+		 * 页向量现在用于确保加1操作尽可能快地执行， 因为对页向
+		 * 量的操作是成块执行的
+		 * */
 		while (!list_empty(&page_list)) {
 			page = lru_to_page(&page_list);
 			VM_BUG_ON(PageLRU(page));
@@ -921,7 +1090,9 @@ static void shrink_active_list(unsigned long nr_pages, struct zone *zone,
 	unsigned long pgmoved;
 	int pgdeactivate = 0;
 	unsigned long pgscanned;
+	/* 保存仍然有待扫描的页， 这些页在扫描之后才能确定其归宿 */
 	LIST_HEAD(l_hold);	/* The pages which were snipped off */
+	/* 分别保存在函数结束时将放回内存域的活动链表或惰性链表的页*/
 	LIST_HEAD(l_inactive);	/* Pages to go onto the inactive_list */
 	LIST_HEAD(l_active);	/* Pages to go onto the active_list */
 	struct page *page;
@@ -941,6 +1112,9 @@ static void shrink_active_list(unsigned long nr_pages, struct zone *zone,
 		 * `distress' is a measure of how much trouble we're having
 		 * reclaiming pages.  0 -> no problems.  100 -> great trouble.
 		 */
+		/* prev_priority指定了上一次try_to_free_pages运行期间扫描内
+		 * 存域的优先级，prev_priority指定了上一次try_to_free_pages
+		 * 运行期间扫描内存域的优先级 */
 		distress = 100 >> min(zone->prev_priority, priority);
 
 		/*
@@ -949,6 +1123,11 @@ static void shrink_active_list(unsigned long nr_pages, struct zone *zone,
 		 * how much memory
 		 * is mapped.
 		 */
+		/* 表示总的可用内存中已映射内存页（不仅用于缓存数据，而且由进程
+		 * 明确地请求用于存储数据）的比例。该比例是通过将当前映射页数目
+		 * 除以系统启动时可用内存页的总数计算出来的。然后将结果乘以100，
+		 * 放大为百分比值
+		 * */
 		mapped_ratio = ((global_page_state(NR_FILE_MAPPED) +
 				global_page_state(NR_ANON_PAGES)) * 100) /
 					vm_total_pages;
@@ -965,6 +1144,10 @@ static void shrink_active_list(unsigned long nr_pages, struct zone *zone,
 		 * A 100% value of vm_swappiness overrides this algorithm
 		 * altogether.
 		 */
+		/* swap_tendency。 顾名思义， 它表示系统的页交换趋势
+		 * sc_swappiness是另一个内核参数，
+		 * 通常基于/proc/sys/vm/swappiness中的设置
+		 * */
 		swap_tendency = mapped_ratio / 2 + distress + sc->swappiness;
 
 		/*
@@ -979,6 +1162,11 @@ static void shrink_active_list(unsigned long nr_pages, struct zone *zone,
 		 * Avoid div by zero with nr_inactive+1, and max resulting
 		 * value is vm_total_pages.
 		 */
+		/* 如果活动链表和惰性链表的长度之间存在较大的不平衡，内核将
+		 * 允许更容易地进行页交换和页面回收，以便平衡二者的长度。
+		 * 但内核也做了一些工作，以便在swappiness值较低时，避免两个
+		 * 链表的长度差距造成太大的影响
+		 * */
 		imbalance  = zone_page_state(zone, NR_ACTIVE);
 		imbalance /= zone_page_state(zone, NR_INACTIVE) + 1;
 
@@ -1011,6 +1199,13 @@ static void shrink_active_list(unsigned long nr_pages, struct zone *zone,
 		 * Now use this metric to decide whether to start moving mapped
 		 * memory onto the inactive list.
 		 */
+		/* 如果swap_tendency大于或等于100，将会换出映射页，而
+		 * reclaim_mapped设置为1。 否则该变量保持其默认值0，
+		 * 因而只从页缓存回收页
+		 * 因为会将vm_swappiness加到swap_tendency，管理员可以
+		 * 在任何时间启用映射页的换出，只需要将vm_swappiness指
+		 * 定为100，就无须考虑其他系统参数的设置
+		 * */
 		if (swap_tendency >= 100)
 force_reclaim_mapped:
 			reclaim_mapped = 1;
@@ -1028,7 +1223,21 @@ force_reclaim_mapped:
 		cond_resched();
 		page = lru_to_page(&l_hold);
 		list_del(&page->lru);
+		/* 如果page_mapped返回一个非0值表示该页关联到至少一个进程，
+		 * 那么需要判断该页对系统是否重要，这稍微有些困难。如果要
+		 * 将该页放回活动链表， 必须满足下列３ 个条件之一
+		 * */
 		if (page_mapped(page)) {
+			/* 1. reclaim_mapped等于0,即不回收映射页
+			 * 2. 系统没有交换区，而且刚刚检查的页注册为匿名页
+			 * 在这种情况下，该内存页没有地方可换出
+			 * 3. 逆向映射机制提供了page_referenced函数，可以
+			 * 检查（在上一次检查以来）使用某一页的进程的数目。
+			 * 这是根据各个页表项中保存的对应硬件状态位来确定
+			 * 的。尽管该函数返回了进程的数目，但只需要知道是
+			 * 否至少有一个进程访问了该页即可，即返回值是否大
+			 * 于0。如果是这样，本条件就满足了
+			 * */
 			if (!reclaim_mapped ||
 			    (total_swap_pages == 0 && PageAnon(page)) ||
 			    page_referenced(page, 0)) {
@@ -1095,11 +1304,40 @@ force_reclaim_mapped:
 	spin_unlock_irq(&zone->lru_lock);
 
 	pagevec_release(&pvec);
+	/* 到目前为止， 内存域中的页已经在LRU链表上进行重新分配， 以找到适合
+	 * 回收的候选页。 但其内存空间尚未释放。 释放内存的最终步骤由
+	 * shrink_inactive_list和shrink_page_list函数执行， 二者彼此协作来执
+	 * 行该任务。 shrink_inactive_lists将zone->inactive_list中的页群集为
+	 * 块， 这有利于交换聚集，而shrink_page_list将结果链表上的成员向下传
+	 * 递并将页发送给相关的后备存储器（这意味着页被同步、换出或丢弃） 。
+	 * 但这个看起来很简单的任务会导致几个问题， 读者在下面会看到。除了页
+	 * 的链表以及通常的收缩控制参数， shrink_page_list还需要另一个参数，
+	 * 以控制两种运作模式的选择： PAGEOUT_IO_ASYNC指定异步写出， 而
+	 * PAGEOUT_IO_SYNC指定同步写出。 在第一种情况下， 写请求传递给块层后
+	 * 不需要进一步的工作， 在第二种情况下， 内核发出写请求之后需要等待
+	 * 写操作完成
+	 * */
 }
 
 /*
  * This is a basic per-zone page freer.  Used by both kswapd and direct reclaim.
  */
+/* 1. shrink_zone是从内存移除很少使用的页的入口点， 在周期性的kswapd机制中调用。
+ * 该方法负责两件事： 通过在活动链表和惰性链表之间移动页（使用shrink_active_list）
+ * ， 试图在一个内存域中维护活动页和不活动页的数目的均衡； 还通过shrink_cache，
+ * 控制了选择换出页的过程。 在确定内存域中换出页数的逻辑和具体换出哪些页的决策之
+ * 间， shrink_zone充当了一个中间人。
+ * 2. shrink_active_list是一个综合性的辅助函数， 内核使用该函数在活动页和不活动页
+ * 的两个链表之间移动页。 该函数会被告知需要在两个链表之间转移的页数， 而后该函数
+ * 试图选择使用最少的页。因而在本质上， shrink_active_list负责决定随后将换出哪些
+ * 页， 保留哪些页。 换言之， 该函数实现了页面选择的策略部分。
+ * 3. shrink_inactive_list从给定内存域的惰性链表移除选定数目的不活动页， 将其传送
+ * 到shrink_page_list函数， 后者将向各个对应的后备存储器发出回写数据的请求， 以便
+ * 在物理内存中释放空间， 回收所选定的页。
+ * 如果由于任何原因， 不能回写页（有些程序可能明确地阻止回写） ，
+ * shrink_inactive_list必须将不能回写的页放回活动链表或
+ * 惰性链表.
+ * */
 static unsigned long shrink_zone(int priority, struct zone *zone,
 				struct scan_control *sc)
 {
@@ -1133,6 +1371,10 @@ static unsigned long shrink_zone(int priority, struct zone *zone,
 			nr_to_scan = min(nr_active,
 					(unsigned long)sc->swap_cluster_max);
 			nr_active -= nr_to_scan;
+			/* 如果扫描活动页，内核将使用shrink_active_list将页从
+			 * 活动链表移动到惰性链表。很自然，移动的是使用最少的
+			 * 活动页
+			 * */
 			shrink_active_list(nr_to_scan, zone, sc, priority);
 		}
 
@@ -1140,6 +1382,10 @@ static unsigned long shrink_zone(int priority, struct zone *zone,
 			nr_to_scan = min(nr_inactive,
 					(unsigned long)sc->swap_cluster_max);
 			nr_inactive -= nr_to_scan;
+			/* 不活动页可以通过shrink_inactive_list直接从缓存移除。
+			 * 该函数试图从惰性链表回收所需数目的页。返回值是实际
+			 * 上成功回收的页数
+			 * */
 			nr_reclaimed += shrink_inactive_list(nr_to_scan, zone,
 								sc);
 		}

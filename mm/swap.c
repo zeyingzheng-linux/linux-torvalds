@@ -202,16 +202,44 @@ EXPORT_SYMBOL(mark_page_accessed);
  * lru_cache_add: add a page to the page lists
  * @page: the page to add
  */
+/* 内核提供了另一个缓存， 称为LRU缓存， 以加速向系统的LRU链表添加页的
+ * 操作。 它利用页向量来收集page实例， 将其逐组置于系统的活动链表或惰
+ * 性链表上。 这两个链表在内核中是一个热点， 但必须通过自旋锁保护。
+ * 为降低锁竞争的几率， 新页不会立即添加到链表， 而是首先缓冲到一个各
+ * CPU列表上
+ * static DEFINE_PER_CPU(struct pagevec, lru_add_pvecs) = { 0, };
+ * */
+/* lru_cache_add只在mm/filemap.c中的add_to_page_cache_lru中需要， 用于
+ * 将一页同时添加到页缓存和LRU缓存。 但这是将一页同时添加到页缓存和LRU
+ * 链表的标准函数。 最重要的是， mpage_readpages和do_generic_mapping_read
+ * 会使用该函数， 在从文件或映射读取数据时， 块层结束于这两个标准函数
+ * */
 void fastcall lru_cache_add(struct page *page)
 {
+	/* 因为该函数访问了一个特定于CPU的数据结构， 它必须阻止CPU
+	 * 处理中断（中断处理之后可能恢复到另一个CPU上执行） 。 这
+	 * 种形式的保护是通过调用get_cpu_var隐式提供的， 该函数不仅
+	 * 禁用了抢占， 还返回了相应的各CPU变量
+	 * */
 	struct pagevec *pvec = &get_cpu_var(lru_add_pvecs);
 
 	page_cache_get(page);
+	/* __pagevec_lru_add将页向量中的所有页， 都添加各页所属内存域
+	 * 的惰性链表中（页向量中的页， 可能属于不同的内存域）
+	 * */
 	if (!pagevec_add(pvec, page))
 		__pagevec_lru_add(pvec);
 	put_cpu_var(lru_add_pvecs);
 }
 
+/* 通常都认为内存页最初是不活动的， 在确定其价值之后， 才能认为是活动的。
+ * 但有些例程对其使用的页有高度评价， 会调用lru_cache_add_active直接将
+ * 页放置到内存页的活动链表上
+ * 1. mm/swap_state.c中的read_swap_cache_async， 该函数从交换缓存读取页
+ * 2. 缺页异常处理程序__do_fault、 do_anonymous_page、 do_wp_page和
+ * do_no_page， 这些实现在mm/memory.c中
+ *
+ * */
 void fastcall lru_cache_add_active(struct page *page)
 {
 	struct pagevec *pvec = &get_cpu_var(lru_add_active_pvecs);
@@ -294,6 +322,10 @@ int lru_add_drain_all(void)
  * page count inside the lock to see whether shrink_cache grabbed the page
  * via the LRU.  If it did, give up: shrink_cache will free it.
  */
+/* 将向量中所有页的使用计数器减1。 如果某些页的使用计数器归0， 即
+ * 不再使用， 则自动返回到伙伴系统。 如果页在系统的某个LRU链表上，
+ * 则从该链表移除， 无论其使用计数器为何值
+ * */
 void release_pages(struct page **pages, int nr, int cold)
 {
 	int i;

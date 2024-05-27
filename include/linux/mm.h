@@ -250,6 +250,8 @@ static inline int put_page_testzero(struct page *page)
 static inline int get_page_unless_zero(struct page *page)
 {
 	VM_BUG_ON(PageCompound(page));
+	/* 如果旧值不等于0，那么自增1，返回true；
+	 * 如果旧值等于0，返回false */
 	return atomic_inc_not_zero(&page->_count);
 }
 
@@ -644,6 +646,17 @@ static inline int page_mapcount(struct page *page)
 /*
  * Return true if this page is mapped into pagetables.
  */
+/* 检查该页是否嵌入到了某个进程的页表中。
+ * 使用逆向映射数据结构很容易完成该任务
+ * 有关页是否映射在页表中的信息保存在各个page实例的_mapcount
+ * 成员中。如果页由一个进程映射，该计数器值为0，未映射的页，
+ * 其值为-1
+ * */
+/* zzy: page_mapped 是用来判断 page 是否在 page table 里面。
+ * 这里用 page_mapped() 主要是用来判断当前 page 是否是一个
+ * mmap + MAP_SHARED 产生的页（因为 MAP_PRIVATE 产生的页不会
+ * 填充到 page table 里面，具体可以自己看下代码）
+ * */
 static inline int page_mapped(struct page *page)
 {
 	return atomic_read(&(page)->_mapcount) >= 0;

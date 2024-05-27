@@ -69,12 +69,20 @@ static inline void pagevec_release(struct pagevec *pvec)
 		__pagevec_release(pvec);
 }
 
+/* 另一个用于释放页的函数， 它将一个给定页向量中所有页的使用计数器减1。
+ * 在计数器归0时， 对应页占用的内存将返还给伙伴系统。 与pagevec_release
+ * 不同， 该函数假定向量中所有的页都不在任何LRU链表上
+ * */
 static inline void pagevec_release_nonlru(struct pagevec *pvec)
 {
 	if (pagevec_count(pvec))
 		__pagevec_release_nonlru(pvec);
 }
 
+/* 将一组页占用的内存空间返还给伙伴系统。 调用者负责确认页的
+ * 使用计数器为0（表明页在其他地方没有使用） ， 且未包含在任
+ * 何LRU链表中
+ * */
 static inline void pagevec_free(struct pagevec *pvec)
 {
 	if (pagevec_count(pvec))

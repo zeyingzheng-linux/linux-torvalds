@@ -387,6 +387,14 @@ static int page_referenced_file(struct page *page)
  * Quick test_and_clear_referenced for all mappings to a page,
  * returns the number of ptes which referenced the page.
  */
+/* 如果一个不经常访问的页（因而是不活动的） 的PG_active和
+ * PG_referenced标志位均未设置。 这意味着， 接下来需要两次
+ * mark_page_accessed调用（其中不能夹杂page_referenced调用） ， 才能
+ * 将其从惰性链表移动到活动链表。 反之亦然： 一个高度活动的页， 同时
+ * 设置了PG_active和PG_referenced标志位， 也需要两次page_referenced
+ * 调用（其间不能插入mark_page_accessed调用） 才能从活动链表移动到惰
+ * 性链表
+ * */
 int page_referenced(struct page *page, int is_locked)
 {
 	int referenced = 0;
@@ -397,9 +405,18 @@ int page_referenced(struct page *page, int is_locked)
 	if (TestClearPageReferenced(page))
 		referenced++;
 
+	/* 请注意， 如果系统当前在进行页交换， 如果内存页属于持有交换令牌
+	 * 的特定进程， page_referenced也会将该页标记为PG_referenced（通过
+	 * page_referenced_one， 由page_referenced_file和page_referenced_anon
+	 * 调用）， 即使该页没有被访问。 这阻止了回收持有交换令牌进程的页，
+	 * 在页交换较多的情况， 会增强所述进程的性能
+	 * */
 	if (page_mapped(page) && page->mapping) {
 		if (PageAnon(page))
 			referenced += page_referenced_anon(page);
+		/* page_referenced_file要求锁定该页（以防止在内核操作映射
+		 * 时出现干扰， 例如， 截断文件， 可能致使映射的一部分消失）
+		 * */
 		else if (is_locked)
 			referenced += page_referenced_file(page);
 		else if (TestSetPageLocked(page))
@@ -832,6 +849,17 @@ static void try_to_unmap_cluster(unsigned long cursor,
 	pte_unmap_unlock(pte - 1, ptl);
 }
 
+/* 1. _PAGE_PRESENT标志位清除表示该页已经换出。在某个进程访问该页时，
+ * 这是很重要的。 因为将产生一个缺页异常， 内核需要检测该页已经换出
+ * 2. _PAGE_FILE标志位清除表示该页在交换缓存中。，用于非线性映射的
+ * 页表项也不会设置_PAGE_PRESENT，但可以通过_PAGE_FILE标志位与换出
+ * 页相区分
+ * 3. 用ptep_clear_flush清除页表项时， 会返回此前的页表项的一个副本。
+ * 如果该页表项的脏标志位已经置位， 则对应的页在逆向映射处理过程中
+ * 被某些使用者修改。 在shrink_page_list中， 它需要与后备存储器
+ * （这种情况下是交换区） 同步。因而PTE中的脏标志位需要转换为页
+ * 标志位PG_dirty
+ * */
 static int try_to_unmap_anon(struct page *page, int migration)
 {
 	struct anon_vma *anon_vma;

@@ -325,10 +325,17 @@ struct zone {
 	/* active_list是活动页的集合， 而inactive_list则不活动页的集合（page实例） */
 	struct list_head	active_list;
 	struct list_head	inactive_list;
+	/* 内核需要扫描活动列表和惰性列表来查找可以在二者之间移动的页， 或从惰性列表回
+	 * 收的页。 但完整的链表不可能一遍扫描完成， 每次只能扫描活动链表上的
+	 * nr_scan_active个和惰性链表上的nr_scan_inactive个链表元素。 由于内核使用了LRU
+	 * 方案， 这个数目是从链表尾部开始计算的。 pages_scanned记录的是前一遍回收时扫
+	 * 描的页数， 而vm_stat提供了关于当前内存域的统计信息， 例如当前活动和不活动页
+	 * 的数目。回想前文， 可知用于统计的成员vm_stat可以用辅助函数zone_page_state访问
+	 * */
 	/* nr_scan_active和nr_scan_inactive指定在回收内存时需要扫描的活动和不活动页的数目 */
 	unsigned long		nr_scan_active;
 	unsigned long		nr_scan_inactive;
-	/* pages_scanned指定了上次换出一页以来， 有多少页未能成功扫描 */
+	/* pages_scanned指定了上次换出一页以来， 有多少页成功扫描 */
 	unsigned long		pages_scanned;	   /* since last reclaim */
 	/* flags描述内存域的当前状态。 允许使用下列标志 */
 	unsigned long		flags;		   /* zone flags, see below */
